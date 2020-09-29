@@ -1,0 +1,6 @@
+Built using riscv/flute32/setup.sh from tapasco-riscv.
+Modify the setup.sh script to apply flute_tapasco_dexie.diff instead of flute_tapasco.diff. The diff file is for commit 3e2597e of the Flute repository.
+Set the additional defines by adding the following line to setup.sh before the for-loop :
+  export BSC_COMPILATION_FLAGS='-D INCLUDE_TANDEM_VERIF -D TANDEM_VERIF_DIRECT -D INCLUDE_DEXIE_TAP'
+
+Copy the files from IP/riscv/FluteRV32ACIMU/* recursively to the DExIE IP folder ip/flute32.

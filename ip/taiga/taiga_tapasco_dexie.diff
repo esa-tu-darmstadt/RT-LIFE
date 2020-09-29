@@ -1,0 +1,1401 @@
+diff --git a/core/alu_unit.sv b/core/alu_unit.sv
+index 00633b8..cf1c6cf 100755
+--- a/core/alu_unit.sv
++++ b/core/alu_unit.sv
+@@ -86,6 +86,7 @@ module alu_unit(
+     assign wb.rd = result;
+     assign wb.done = issue.new_request;
+     assign wb.id = issue.instruction_id;
++    assign wb.pc = alu_inputs.pc; //Added the PC output for the DExIE dataflow writeback interface.
+ 
+     ////////////////////////////////////////////////////
+     //Assertions
+diff --git a/core/branch_predictor_ram.sv b/core/branch_predictor_ram.sv
+index 50da88e..7a43bcf 100644
+--- a/core/branch_predictor_ram.sv
++++ b/core/branch_predictor_ram.sv
+@@ -45,7 +45,8 @@ module branch_predictor_ram
+             branch_ram[i] = '0;
+     end
+ 
+-    always_ff @(posedge clk) begin
++    //Workaround: Use always instead of always_ff since the Questa simulator does not like the initial block otherwise.
++    always @(posedge clk) begin
+         if (write_en)
+             branch_ram[write_addr] <= write_data;
+     end
+diff --git a/core/branch_unit.sv b/core/branch_unit.sv
+index 5274122..0c36679 100755
+--- a/core/branch_unit.sv
++++ b/core/branch_unit.sv
+@@ -36,7 +36,13 @@ module branch_unit(
+         //Trace signals
+         output logic tr_branch_correct,
+         output logic tr_branch_misspredict,
+-        output logic tr_return_misspredict
++        output logic tr_return_misspredict,
++        
++        //DExIE signals
++        output logic dexie_cf_valid,
++        output logic [31:0] dexie_cf_cur_pc,
++        output logic [31:0] dexie_cf_cur_instruction,
++        output logic [31:0] dexie_cf_next_pc
+         );
+ 
+     logic branch_issued_r;
+@@ -52,15 +58,22 @@ module branch_unit(
+     logic result;
+     logic result_ex;
+ 
++    logic jump;
++    
+     logic [2:0] fn3_ex;
+     logic jump_ex;
+ 
+     //Branch Predictor
++    logic branch_taken_w;
++    
+     logic branch_taken;
+     logic branch_correctly_taken;
+     logic branch_correclty_not_taken;
+     logic miss_predict;
+ 
++    logic [31:0] jump_pc_w;
++    logic [31:0] njump_pc_w;
++    
+     logic [31:0] pc_ex;
+     logic [31:0] jump_pc;
+     logic [31:0] njump_pc;
+@@ -101,6 +114,7 @@ module branch_unit(
+             .result(result)
+         );
+ 
++    assign branch_taken_w = (~jump & (result ^ branch_inputs.fn3[0])) | jump;
+     assign branch_taken = (~jump_ex & (result_ex ^ fn3_ex[0])) | jump_ex;
+ 
+     assign jal_imm = {branch_inputs.instruction[31], branch_inputs.instruction[19:12], branch_inputs.instruction[20], branch_inputs.instruction[30:21]};
+@@ -125,26 +139,39 @@ module branch_unit(
+ 
+     assign jump_pc_dec = jump_base + pc_offset;
+ 
++    assign jump = (branch_inputs.jal | branch_inputs.jalr);
+     always_ff @(posedge clk) begin
+         if (instruction_is_completing | ~branch_issued_r) begin
+             fn3_ex <= branch_inputs.fn3;
+             result_ex <= result;
+-            jump_ex <= (branch_inputs.jal | branch_inputs.jalr);
++            jump_ex <= jump;
+         end
+     end
+ 
+     //Predictor support
+     ////////////////////////////////////////////////////
++    assign jump_pc_w = {jump_pc_dec[31:1], 1'b0};
++    assign njump_pc_w = branch_inputs.dec_pc + 4;
+     always_ff @(posedge clk) begin
+         if (instruction_is_completing | ~branch_issued_r) begin
+             pc_ex <= branch_inputs.dec_pc;
+-            jump_pc <= {jump_pc_dec[31:1], 1'b0};
+-            njump_pc <= branch_inputs.dec_pc + 4;
++            jump_pc <= jump_pc_w;
++            njump_pc <= njump_pc_w;
+             branch_metadata <= branch_inputs.branch_metadata;
+             branch_prediction_used <= branch_inputs.branch_prediction_used;
+             bp_update_way <= branch_inputs.bp_update_way;
+         end
+     end
++    
++    //Branch Unit inputs are set even if no branch instruction is issued.
++    //If the current instruction was mispredicted, ignore it.
++    assign dexie_cf_valid = (~rst & branch_inputs.dec_pc_valid & ~branch_flush)
++	                        & (~issue.new_request | instruction_is_completing | ~branch_issued_r);
++    assign dexie_cf_cur_pc = branch_inputs.dec_pc;
++    assign dexie_cf_cur_instruction = branch_inputs.instruction;
++    //If this is a branch instruction (i.e. there is an issue for the Branch Unit), the branch may be taken or not taken.
++    // otherwise, always use the untaken PC.
++    assign dexie_cf_next_pc = (issue.new_request & branch_taken_w) ? jump_pc_w : njump_pc_w;
+ 
+     assign br_results.pc_ex = pc_ex;
+     assign br_results.jump_pc = jump_pc;
+diff --git a/core/decode.sv b/core/decode.sv
+index 58cd797..0709117 100755
+--- a/core/decode.sv
++++ b/core/decode.sv
+@@ -70,7 +70,9 @@ module decode(
+ 
+         output logic tr_instruction_issued_dec,
+         output logic [31:0] tr_instruction_pc_dec,
+-        output logic [31:0] tr_instruction_data_dec
++        output logic [31:0] tr_instruction_data_dec,
++        
++        input logic dexie_stall
+         );
+ 
+     logic [2:0] fn3;
+@@ -111,6 +113,7 @@ module decode(
+     logic [11:0] ls_offset;
+     logic is_load;
+     logic is_store;
++    logic is_csr;
+     logic amo_op;
+     logic store_conditional;
+     logic load_reserve;
+@@ -194,7 +197,9 @@ module decode(
+ 
+     ////////////////////////////////////////////////////
+     //Issue Determination
+-    assign issue_valid = fb_valid & ti.id_available & ~gc_issue_hold & ~gc_fetch_flush;
++    
++    //The DExIE stall signal is used as an additional issue condition.
++    assign issue_valid = fb_valid & ti.id_available & ~gc_issue_hold & ~gc_fetch_flush & ~dexie_stall;
+ 
+     assign operands_ready = ~rf_decode.rs1_conflict & ~rf_decode.rs2_conflict;
+     assign load_store_operands_ready = ~rf_decode.rs1_conflict & (~rf_decode.rs2_conflict | (rf_decode.rs2_conflict & (opcode_trim == STORE_T)));
+@@ -245,6 +250,7 @@ module decode(
+     assign alu_inputs.lshift = ~fn3[2];
+     assign alu_inputs.logic_op = fb.alu_logic_op;
+     assign alu_inputs.op = fb.alu_op;
++    assign alu_inputs.pc = fb.pc; //PC signal added for DExIE dataflow writeback.
+ 
+     ////////////////////////////////////////////////////
+     //Load Store unit inputs
+@@ -303,7 +309,6 @@ module decode(
+     logic sfence;
+     logic ifence;
+     logic environment_op;
+-    logic is_csr;
+     assign sfence = fb.instruction[25];
+     assign ifence =  (opcode_trim == FENCE_T) && fn3[0];
+     assign environment_op = (opcode_trim == SYSTEM_T) && (fn3 == 0);
+@@ -333,6 +338,7 @@ module decode(
+             assign mul_inputs.rs1 = rf_decode.rs1_data;
+             assign mul_inputs.rs2 = rf_decode.rs2_data;
+             assign mul_inputs.op = fn3[1:0];
++            assign mul_inputs.pc = fb.pc; //PC signal added for DExIE dataflow writeback.
+         end
+     endgenerate
+ 
+@@ -380,6 +386,7 @@ module decode(
+             assign div_inputs.rs2 = rf_decode.rs2_data;
+             assign div_inputs.op = fn3[1:0];
+             assign div_inputs.reuse_result = prev_div_result_valid_r & current_op_resuses_rs1_rs2;
++            assign div_inputs.pc = fb.pc; //PC signal added for DExIE dataflow writeback.
+         end
+     endgenerate
+ 
+diff --git a/core/div_unit.sv b/core/div_unit.sv
+index d3d95ad..48ca95e 100755
+--- a/core/div_unit.sv
++++ b/core/div_unit.sv
+@@ -53,6 +53,7 @@ module div_unit
+         logic negate_remainder;
+         logic reuse_result;
+         instruction_id_t instruction_id;
++        logic [31:0] pc; //PC signal added for DExIE dataflow writeback.
+     } div_fifo_inputs_t;
+ 
+     div_fifo_inputs_t fifo_inputs;
+@@ -94,6 +95,7 @@ module div_unit
+     assign fifo_inputs.negate_remainder = negate_remainder;
+     assign fifo_inputs.reuse_result = div_inputs.reuse_result;
+     assign fifo_inputs.instruction_id = issue.instruction_id;
++    assign fifo_inputs.pc = div_inputs.pc; //PC signal added for DExIE dataflow writeback. Pass it through the stage internal FIFO.
+ 
+     ////////////////////////////////////////////////////
+     //Input FIFO
+@@ -134,6 +136,7 @@ module div_unit
+     assign wb.rd = negate_if (div_op.remainder_op ? div_core.remainder : div_core.quotient, negate_result);
+     assign wb.done = div_done;
+     assign wb.id = div_op.instruction_id;
++    assign wb.pc = div_op.pc; //PC signal added for DExIE dataflow writeback.
+     ////////////////////////////////////////////////////
+     //Assertions
+ 
+diff --git a/core/external_interfaces.sv b/core/external_interfaces.sv
+index 64139ab..cc226a4 100644
+--- a/core/external_interfaces.sv
++++ b/core/external_interfaces.sv
+@@ -24,6 +24,46 @@ import taiga_config::*;
+ import taiga_types::*;
+ import l2_config_and_types::*;
+ 
++//DExIE interface containing all output and input signals.
++interface dexie_interface;
++	//Branch Unit (Decode/early Execute phase)
++	logic cf_valid;
++	logic [31:0] cf_cur_pc;
++	logic [31:0] cf_cur_instruction;
++	logic [31:0] cf_next_pc;
++	
++    //Decode: 
++    //Early CF trace signals (not registered in contrast to trace outputs).
++    logic [31:0] instruction_pc_dec;
++    logic [31:0] instruction_data_dec;
++    logic instruction_issued_dec;
++    
++    //Load Store Unit signals (Dataflow)
++    logic [31:0] df_mem_pc; //PC of the current LSU operation.
++    logic df_mem_load; //Set whenever a load is to be issued. Can be set even if DExIE stalls the LSU through stallOnWrite.
++    logic df_mem_store; //Set whenever a store is to be issued. Set even if DExIE stalls the LSU through stallOnWrite.
++    logic [31:0] df_mem_addr; //Address of the LSU operation. Valid if df_mem_load or df_mem_store is set.
++    logic [1:0] df_mem_len; //Length of the LSU operation (bits 1:0 of funct3). Valid if df_mem_load or df_mem_store is set.
++    logic [31:0] df_mem_storedata; //Data to store in case df_mem_store is set. Valid if df_mem_store is set.
++    logic df_mem_stalling; //Set whenever a operation stalls because of DExIE. Always valid.
++    
++    //Writeback signals (Dataflow)
++    logic [31:0] df_reg_pc; //PC of the writeback.
++    logic [4:0] df_reg_rd_addr; //Current RD register address. The value 0 stands for either no writeback or a writeback to the null register.
++    logic [31:0] df_reg_rd_val; //New RD value. Valid if df_reg_rd_addr != 0.
++    
++    //Input (from DExIE)
++    logic stall; //Stalls issues from the decode phase to execution units.
++    logic df_mem_stallOnStore; //If set, new stores in the LSU are stalled before being issued to the BRAM, data cache or bus.
++    logic df_mem_continueStore; //If set, new stores in the LSU can proceed even if df_mem_stallOnStore is set.
++    
++    modport master (input stall, df_mem_stallOnStore, df_mem_continueStore,
++            output cf_valid, cf_cur_pc, cf_cur_instruction, cf_next_pc,
++			instruction_pc_dec, instruction_data_dec, instruction_issued_dec,
++            df_mem_pc, df_mem_load, df_mem_store, df_mem_addr, df_mem_len, df_mem_storedata, df_mem_stalling,
++            df_reg_pc, df_reg_rd_addr, df_reg_rd_val);
++endinterface
++
+ interface axi_interface;
+ 
+     logic arready;
+diff --git a/core/load_store_unit.sv b/core/load_store_unit.sv
+index c76d425..4cf1f4f 100755
+--- a/core/load_store_unit.sv
++++ b/core/load_store_unit.sv
+@@ -60,7 +60,19 @@ module load_store_unit (
+         output exception_packet_t ls_exception,
+         output logic ls_exception_valid,
+ 
+-        output unit_writeback_t wb
++        output unit_writeback_t wb,
++        
++        //DExIE signals (see external_interfaces.sv)
++        output logic [31:0] dexie_df_mem_pc,
++        output logic dexie_df_mem_load,
++        output logic dexie_df_mem_store,
++        output logic [31:0] dexie_df_mem_addr,
++        output logic [1:0] dexie_df_mem_len,
++        output logic [31:0] dexie_df_mem_storedata,
++        output logic dexie_df_mem_stalling,
++        
++        input logic dexie_df_mem_stallOnStore,
++        input logic dexie_df_mem_continueStore
+         );
+ 
+     localparam NUM_SUB_UNITS = USE_D_SCRATCH_MEM+USE_BUS+USE_DCACHE;
+@@ -81,6 +93,7 @@ module load_store_unit (
+     logic units_ready;
+     logic store_ready;
+     logic issue_request;
++    logic issue_request_ext; //issue_request with DExIE stall condition.
+     logic load_complete;
+ 
+     logic [31:0] virtual_address;
+@@ -111,7 +124,7 @@ module load_store_unit (
+         logic load_store_forward;
+         instruction_id_t instruction_id;
+         instruction_id_t store_forward_id;
+-        //exception support
++        //exception and DExIE dataflow support
+         logic [31:0] pc;
+         //amo support
+         amo_details_t amo;
+@@ -123,6 +136,8 @@ module load_store_unit (
+         logic [1:0] byte_addr;
+         instruction_id_t instruction_id;
+         logic [0:0] subunit_id;
++        //DExIE dataflow (writeback) support
++        logic [31:0] pc;
+     } load_attributes_t;
+     load_attributes_t  load_attributes_in, stage2_attr;
+     load_store_input_fifo_t  stage1;
+@@ -152,7 +167,7 @@ module load_store_unit (
+     assign input_fifo.push = issue.new_request;
+     assign input_fifo.supress_push = gc_fetch_flush;
+     assign issue.ready = 1;//As FIFO depth is the same as MAX_INFLIGHT_COUNT
+-    assign input_fifo.pop = issue_request;
++    assign input_fifo.pop = issue_request_ext;
+     assign stage1 = input_fifo.data_out;
+ 
+     ////////////////////////////////////////////////////
+@@ -170,13 +185,15 @@ module load_store_unit (
+ 
+     always_ff @ (posedge clk) begin
+         store_done_id <= stage1.instruction_id;
+-        store_complete <= stage1.store & issue_request;
++        store_complete <= stage1.store & issue_request_ext;
+     end
+ 
+     //When switching units, ensure no outstanding loads so that there can be no timing collisions with results
+     assign unit_stall = (current_unit != last_unit) && load_attributes.valid;
+     assign store_ready = stage1.store & store_forwarding.data_valid;
+     assign issue_request = input_fifo.valid & units_ready & ~unit_stall & ~unaligned_addr & (~stage1.store | store_ready);
++    //DExIE DF: Stall stores if stallOnWrite is set and continueWrite is not set.
++    assign issue_request_ext = issue_request & (~stage1.store | ~dexie_df_mem_stallOnStore | dexie_df_mem_continueStore);
+ 
+     ////////////////////////////////////////////////////
+     //TLB interface
+@@ -236,6 +253,21 @@ module load_store_unit (
+     assign shared_inputs.store = stage1.store;
+     assign shared_inputs.be = be;
+     assign shared_inputs.fn3 = stage1.fn3;
++    
++    //DExIE DF signals.
++    //Use the current PC from the stage1 FIFO output.
++    assign dexie_df_mem_pc = stage1.pc; 
++    //Use the issue_request signal without DExIE stall.
++    assign dexie_df_mem_load = issue_request & stage1.load; 
++    assign dexie_df_mem_store = issue_request & stage1.store;
++    //Address as in shared_inputs.
++    assign dexie_df_mem_addr = shared_inputs.addr;
++    //Use the lower two bits of the instruction's funct3 as the length.
++    assign dexie_df_mem_len = shared_inputs.fn3[1:0];
++    //Use the raw write data instead of the byte selections below.
++    assign dexie_df_mem_storedata = stage1_raw_data;
++    //Set the stalling signal if stall on store prevents the issue.
++    assign dexie_df_mem_stalling = issue_request & ~issue_request_ext;
+ 
+     //Store forwarding request
+     assign store_forwarding.id = stage1.load_store_forward ? stage1.store_forward_id : stage1.instruction_id;
+@@ -263,10 +295,11 @@ module load_store_unit (
+     assign load_attributes_in.fn3 = stage1.fn3;
+     assign load_attributes_in.byte_addr = virtual_address[1:0];
+     assign load_attributes_in.instruction_id = stage1.instruction_id;
++    assign load_attributes_in.pc = stage1.pc; //Feed the PC to the stage 2 FIFO for DExIE DF writeback signals.
+ 
+     assign load_attributes.data_in = load_attributes_in;
+ 
+-    assign load_attributes.push = issue_request & stage1.load;
++    assign load_attributes.push = issue_request_ext & stage1.load;
+     assign load_attributes.pop = load_complete;
+     assign load_attributes.supress_push = 0;
+ 
+@@ -276,7 +309,7 @@ module load_store_unit (
+     //Unit Instantiation
+     generate if (USE_D_SCRATCH_MEM) begin
+             assign sub_unit_address_match[BRAM_ID] = bram.address_range_check(tlb.physical_address);
+-            assign bram.new_request = sub_unit_address_match[BRAM_ID] & issue_request;
++            assign bram.new_request = sub_unit_address_match[BRAM_ID] & issue_request_ext;
+ 
+             assign unit_ready[BRAM_ID] = bram.ready;
+             assign unit_data_valid[BRAM_ID] = bram.data_valid;
+@@ -287,7 +320,7 @@ module load_store_unit (
+ 
+     generate if (USE_BUS) begin
+             assign sub_unit_address_match[BUS_ID] = bus.address_range_check(tlb.physical_address);
+-            assign bus.new_request = sub_unit_address_match[BUS_ID] & issue_request;
++            assign bus.new_request = sub_unit_address_match[BUS_ID] & issue_request_ext;
+ 
+             assign unit_ready[BUS_ID] = bus.ready;
+             assign unit_data_valid[BUS_ID] = bus.data_valid;
+@@ -304,7 +337,7 @@ module load_store_unit (
+ 
+     generate if (USE_DCACHE) begin
+             assign sub_unit_address_match[DCACHE_ID] = cache.address_range_check(tlb.physical_address);
+-            assign cache.new_request = sub_unit_address_match[DCACHE_ID] & issue_request;
++            assign cache.new_request = sub_unit_address_match[DCACHE_ID] & issue_request_ext;
+ 
+             assign unit_ready[DCACHE_ID] = cache.ready;
+             assign unit_data_valid[DCACHE_ID] = cache.data_valid;
+@@ -342,7 +375,6 @@ module load_store_unit (
+ 
+     ////////////////////////////////////////////////////
+     //Output bank
+-    assign wb.rd = ls_done ? final_load_data : csr_rd;
+ 
+     logic exception_complete;
+     logic ls_done;
+@@ -351,8 +383,10 @@ module load_store_unit (
+     end
+     assign ls_done = load_complete | exception_complete;
+ 
++    assign wb.rd = ls_done ? final_load_data : csr_rd;
+     assign wb.done = csr_done | ls_done;
+     assign wb.id = csr_done ? csr_id : stage2_attr.instruction_id;
++    assign wb.pc = stage2_attr.pc; //PC signal added for DExIE dataflow writeback.
+     ////////////////////////////////////////////////////
+     //End of Implementation
+     ////////////////////////////////////////////////////
+diff --git a/core/mul_unit.sv b/core/mul_unit.sv
+index 47e2979..29b163e 100755
+--- a/core/mul_unit.sv
++++ b/core/mul_unit.sv
+@@ -39,7 +39,9 @@ module mul_unit(
+ 
+     logic rs1_signed, rs2_signed;
+     logic signed [32:0] rs1_ext, rs2_ext;
++    logic [31:0] pc_ext; //PC signal input added for DExIE dataflow writeback.
+     logic signed [32:0] rs1_r, rs2_r;
++    logic [31:0] pc_r; //PC signal output register added for DExIE dataflow writeback.
+     ////////////////////////////////////////////////////
+     //Implementation
+ 
+@@ -48,11 +50,13 @@ module mul_unit(
+ 
+     assign rs1_ext = signed'({mul_inputs.rs1[31] & rs1_signed, mul_inputs.rs1});
+     assign rs2_ext = signed'({mul_inputs.rs2[31] & rs2_signed, mul_inputs.rs2});
++    assign pc_ext = mul_inputs.pc;
+ 
+     //Input and output registered Multiply
+     always_ff @ (posedge clk) begin
+         rs1_r <= rs1_ext;
+         rs2_r <= rs2_ext;
++        pc_r <= pc_ext;
+         result <= rs1_r * rs2_r;
+     end
+ 
+@@ -73,6 +77,7 @@ module mul_unit(
+     assign wb.rd = mulh[1] ? result[63:32] : result[31:0];
+     assign wb.done = done[1];
+     assign wb.id = id[1];
++    assign wb.pc = pc_r; //PC signal added for DExIE dataflow writeback.
+     ////////////////////////////////////////////////////
+     //End of Implementation
+     ////////////////////////////////////////////////////
+diff --git a/core/ras.sv b/core/ras.sv
+index 813e142..08dd77c 100755
+--- a/core/ras.sv
++++ b/core/ras.sv
+@@ -47,7 +47,8 @@ module ras (
+     assign ras.addr = lut_ram[read_index];
+     assign ras.valid = valid_chain[read_index];
+     
+-    always_ff @ (posedge clk) begin
++    //Workaround: Use always instead of always_ff since the Questa simulator does not like the initial block otherwise.
++    always @ (posedge clk) begin
+         if (ras.push)
+             lut_ram[write_index] <= ras.new_addr;
+     end
+@@ -65,7 +66,8 @@ module ras (
+     assign write_index = (ras.push & ~ras.pop) ? (read_index + RAS_DEPTH_W'(valid_chain[read_index])) : read_index;
+     
+     assign valid_chain_update = ras.push | ras.pop;
+-    always_ff @ (posedge clk) begin
++    //Workaround: Use always instead of always_ff since the Questa simulator does not like the initial block otherwise.
++    always @ (posedge clk) begin
+         if (valid_chain_update)
+             valid_chain[write_index] <= ras.push;
+     end    
+diff --git a/core/register_file.sv b/core/register_file.sv
+index e239523..50170ef 100755
+--- a/core/register_file.sv
++++ b/core/register_file.sv
+@@ -35,7 +35,13 @@ module register_file(
+         //Trace signals
+         output logic tr_rs1_forwarding_needed,
+         output logic tr_rs2_forwarding_needed,
+-        output logic tr_rs1_and_rs2_forwarding_needed
++        output logic tr_rs1_and_rs2_forwarding_needed,
++        
++        //DExIE signals (not used at the moment)
++        output logic dexie_rs1_valid,
++        output logic dexie_rs2_valid,
++        output logic [31:0] dexie_rs1_data,
++        output logic [31:0] dexie_rs2_data
+         );
+ 
+     (* ramstyle = "MLAB, no_rw_check" *) logic [XLEN-1:0] register [31:0];
+@@ -59,7 +65,8 @@ module register_file(
+     end
+ 
+     //Writeback unit does not assert rf_wb.commit when the target register is r0
+-    always_ff @ (posedge clk) begin
++    //Workaround: Use always instead of always_ff since the Questa simulator does not like the initial block otherwise.
++    always @ (posedge clk) begin
+         if (~gc_supress_writeback & valid_write)
+             register[rf_wb.rd_addr] <= rf_wb.rd_data;
+     end
+@@ -74,7 +81,8 @@ module register_file(
+             .rs2_inuse(rs2_inuse)
+             );
+ 
+-    always_ff @ (posedge clk) begin
++    //Workaround: Use always instead of always_ff since the Questa simulator does not like the initial block otherwise.
++    always @ (posedge clk) begin
+         if (rf_decode.instruction_issued)
+             in_use_by[rf_decode.future_rd_addr] <= rf_decode.id;
+     end
+@@ -93,6 +101,13 @@ module register_file(
+ 
+     assign rf_decode.rs1_conflict = rf_decode.uses_rs1 & rs1_inuse & ~rf_wb.rs1_valid;
+     assign rf_decode.rs2_conflict = rf_decode.uses_rs2 & rs2_inuse & ~rf_wb.rs2_valid;
++    
++    //Signal rs1/rs2 valid if rs1/rs2 is used and there is no conflict.
++    //These signals do not register all kinds of ALU input. See alu_rs1_data and alu_rs2_data in decode.sv for those.
++    assign dexie_rs1_valid = rf_decode.uses_rs1 & ~(rs1_inuse & ~rf_wb.rs1_valid); 
++    assign dexie_rs2_valid = rf_decode.uses_rs2 & ~(rs2_inuse & ~rf_wb.rs2_valid);
++    assign dexie_rs1_data = rf_decode.rs1_data;
++    assign dexie_rs2_data = rf_decode.rs2_data;
+ 
+     ////////////////////////////////////////////////////
+     //End of Implementation
+diff --git a/core/taiga.sv b/core/taiga.sv
+index 796cb42..e164cbe 100755
+--- a/core/taiga.sv
++++ b/core/taiga.sv
+@@ -35,6 +35,7 @@ module taiga (
+         wishbone_interface.master m_wishbone,
+ 
+         output trace_outputs_t tr,
++        dexie_interface.master dexie,
+ 
+         l2_requester_interface.master l2,
+ 
+@@ -145,6 +146,33 @@ module taiga (
+     logic tr_rs1_forwarding_needed;
+     logic tr_rs2_forwarding_needed;
+     logic tr_rs1_and_rs2_forwarding_needed;
++    
++	logic dexie_cf_valid;
++	logic [31:0] dexie_cf_cur_pc;
++	logic [31:0] dexie_cf_cur_instruction;
++	logic [31:0] dexie_cf_next_pc;
++	
++    logic [31:0] dexie_df_mem_pc;
++    logic dexie_df_mem_load;
++    logic dexie_df_mem_store;
++    logic [31:0] dexie_df_mem_addr;
++    logic [1:0] dexie_df_mem_len;
++    logic [31:0] dexie_df_mem_storedata;
++    logic dexie_df_mem_stalling;
++    
++    logic dexie_df_mem_stallOnStore;
++    logic dexie_df_mem_continueStore;
++    
++    logic [31:0] dexie_df_reg_pc;
++    logic [4:0] dexie_df_reg_rd_addr;
++    logic [31:0] dexie_df_reg_rd_val;
++        
++    logic dexie_rs1_valid;
++    logic dexie_rs2_valid;
++    logic [31:0] dexie_rs1_data;
++    logic [31:0] dexie_rs2_data;
++    
++    logic dexie_stall;
+     ////////////////////////////////////////////////////
+     //Implementation
+ 
+@@ -219,8 +247,35 @@ module taiga (
+     //Assertions
+ 
+     ////////////////////////////////////////////////////
+-    //Trace Interface
++    //Trace Interface, DExIE
+     generate if (ENABLE_TRACE_INTERFACE) begin
++        //Assign the DExIE output signals without registers.
++        //Instead, registers/FIFO are used inside DExIE where required to reduce the critical path.
++        assign dexie.instruction_issued_dec = tr_instruction_issued_dec;
++        assign dexie.instruction_pc_dec     = tr_instruction_pc_dec;
++        assign dexie.instruction_data_dec   = tr_instruction_data_dec;
++		//The CF signals from branch_unit only are valid if the instruction was issued to any unit
++		// (branch_unit assumes that an instruction not issued to it is untaken, even if the operands are not ready).
++        assign dexie.cf_valid               = dexie_cf_valid & instruction_issued;
++        assign dexie.cf_cur_pc              = dexie_cf_cur_pc;
++        assign dexie.cf_cur_instruction     = dexie_cf_cur_instruction;
++        assign dexie.cf_next_pc             = dexie_cf_next_pc;
++        assign dexie.df_mem_pc              = dexie_df_mem_pc;
++        assign dexie.df_mem_load            = dexie_df_mem_load;
++        assign dexie.df_mem_store           = dexie_df_mem_store;
++        assign dexie.df_mem_addr            = dexie_df_mem_addr;
++        assign dexie.df_mem_len             = dexie_df_mem_len;
++        assign dexie.df_mem_storedata       = dexie_df_mem_storedata;
++        assign dexie.df_mem_stalling        = dexie_df_mem_stalling;
++        
++        assign dexie.df_reg_pc              = dexie_df_reg_pc;
++        assign dexie.df_reg_rd_addr         = dexie_df_reg_rd_addr;
++        assign dexie.df_reg_rd_val          = dexie_df_reg_rd_val;
++        
++        assign dexie_stall                  = dexie.stall;
++        assign dexie_df_mem_stallOnStore    = dexie.df_mem_stallOnStore;
++        assign dexie_df_mem_continueStore   = dexie.df_mem_continueStore;
++
+         always_ff @(posedge clk) begin
+             tr.events.operand_stall <= tr_operand_stall;
+             tr.events.unit_stall <= tr_unit_stall;
+diff --git a/core/taiga_config.sv b/core/taiga_config.sv
+index 4f548a4..2aa431e 100755
+--- a/core/taiga_config.sv
++++ b/core/taiga_config.sv
+@@ -36,7 +36,7 @@ package taiga_config;
+     parameter ENABLE_S_MODE = 0;
+ 
+     parameter CPU_ID = 0;//32-bit value
+-    parameter bit[31:0] RESET_VEC = 32'h80000000;
++    parameter bit[31:0] RESET_VEC = 32'h00000000;
+ 
+     //CSR counter width (33-64 bits): 48-bits --> 32 days @ 100MHz
+     parameter COUNTER_W = 33;
+@@ -95,18 +95,17 @@ package taiga_config;
+ 
+     ////////////////////////////////////////////////////
+     //Address space
+-    parameter SCRATCH_ADDR_L = 32'h80000000;
+-    parameter SCRATCH_ADDR_H = 32'h800FFFFF;
+-    parameter SCRATCH_BIT_CHECK = 4;
++    parameter SCRATCH_ADDR_L = 32'h00010000;
++    parameter SCRATCH_ADDR_H = 32'h0001FFFF;
++    parameter SCRATCH_BIT_CHECK = 16;
+ 
+-    parameter MEMORY_ADDR_L = 32'h40000000;
+-    parameter MEMORY_ADDR_H = 32'h4FFFFFFF;
+-    parameter MEMORY_BIT_CHECK = 4;
+-
+-    parameter BUS_ADDR_L = 32'h60000000;
+-    parameter BUS_ADDR_H = 32'h6FFFFFFF;
+-    parameter BUS_BIT_CHECK = 4;
++    parameter MEMORY_ADDR_L = 32'h80000000;
++    parameter MEMORY_ADDR_H = 32'hFFFFFFFF;
++    parameter MEMORY_BIT_CHECK = 1;
+ 
++    parameter BUS_ADDR_L = 32'h11000000;
++    parameter BUS_ADDR_H = 32'h11003FFF;
++    parameter BUS_BIT_CHECK = 18;
+ 
+     ////////////////////////////////////////////////////
+     //Bus Options
+diff --git a/core/taiga_types.sv b/core/taiga_types.sv
+index 54561ed..304f5fa 100755
+--- a/core/taiga_types.sv
++++ b/core/taiga_types.sv
+@@ -296,6 +296,8 @@ package taiga_types;
+         instruction_id_t id;
+         logic done;
+         logic [XLEN-1:0] rd;
++        //DExIE dataflow (writeback) support
++        logic [31:0] pc;
+     } unit_writeback_t;
+ 
+     typedef struct packed{
+@@ -308,6 +310,8 @@ package taiga_types;
+         logic lshift;
+         logic [1:0] logic_op;
+         logic [1:0] op;
++        //DExIE dataflow (writeback) support
++        logic [31:0] pc;
+     } alu_inputs_t;
+ 
+     typedef struct packed {
+@@ -374,7 +378,7 @@ package taiga_types;
+         logic store;
+         logic load_store_forward;
+         instruction_id_t store_forward_id;
+-        //exception support
++        //exception and DExIE dataflow support
+         logic [31:0] pc;
+         //amo support
+         amo_details_t amo;
+@@ -384,6 +388,8 @@ package taiga_types;
+         logic [XLEN-1:0] rs1;
+         logic [XLEN-1:0] rs2;
+         logic [1:0] op;
++        //DExIE dataflow (writeback) support
++        logic [31:0] pc;
+     } mul_inputs_t;
+ 
+     typedef struct packed{
+@@ -391,6 +397,8 @@ package taiga_types;
+         logic [XLEN-1:0] rs2;
+         logic [1:0] op;
+         logic reuse_result;
++        //DExIE dataflow (writeback) support
++        logic [31:0] pc;
+     } div_inputs_t;
+ 
+     typedef struct packed{
+diff --git a/core/taiga_wrapper.sv b/core/taiga_wrapper.sv
+new file mode 100644
+index 0000000..6dde017
+--- /dev/null
++++ b/core/taiga_wrapper.sv
+@@ -0,0 +1,281 @@
++/*
++ * Copyright © 2019 Carsten Heinz
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++import taiga_config::*;
++import taiga_types::*;
++import l2_config_and_types::*;
++
++module taiga_wrapper (
++	input logic clk,
++	input logic rst,
++
++	output wire [29:0] instruction_bram_addr,
++	output wire        instruction_bram_en,
++	output wire [3:0]  instruction_bram_we,
++	output wire [31:0] instruction_bram_din,
++	input  wire [31:0] instruction_bram_dout,
++
++	output wire [29:0] data_bram_addr,
++	output wire        data_bram_en,
++	output wire [3:0]  data_bram_we,
++	output wire [31:0] data_bram_din,
++	input  wire [31:0] data_bram_dout,
++
++	// AXI Bus
++	// AXI Write Channels
++	output wire                            m_axi_awvalid,
++	input  wire                            m_axi_awready,
++	output wire [5:0]                      m_axi_awid,
++	output wire [31:0]                     m_axi_awaddr,
++	//~ output wire [3:0]                      m_axi_awregion,
++	output wire [7:0]                      m_axi_awlen,
++	output wire [2:0]                      m_axi_awsize,
++	output wire [1:0]                      m_axi_awburst,
++	//~ output wire                            m_axi_awlock,
++	output wire [3:0]                      m_axi_awcache,
++	//~ output wire [2:0]                      m_axi_awprot,
++	//~ output wire [3:0]                      m_axi_awqos,
++
++	output wire                            m_axi_wvalid,
++	input  wire                            m_axi_wready,
++	output wire [31:0]                     m_axi_wdata,
++	output wire [3:0]                      m_axi_wstrb,
++	output wire                            m_axi_wlast,
++
++	input  wire                            m_axi_bvalid,
++	output wire                            m_axi_bready,
++	input  wire [1:0]                      m_axi_bresp,
++	input  wire [5:0]                      m_axi_bid,
++
++	// AXI Read Channels
++	output wire                            m_axi_arvalid,
++	input  wire                            m_axi_arready,
++	output wire [5:0]                      m_axi_arid,
++	output wire [31:0]                     m_axi_araddr,
++	//~ output wire [3:0]                      m_axi_arregion,
++	output wire [7:0]                      m_axi_arlen,
++	output wire [2:0]                      m_axi_arsize,
++	output wire [1:0]                      m_axi_arburst,
++	//~ output wire                            m_axi_arlock,
++	output wire [3:0]                      m_axi_arcache,
++	//~ output wire [2:0]                      m_axi_arprot,
++	//~ output wire [3:0]                      m_axi_arqos,
++
++	input  wire                            m_axi_rvalid,
++	output wire                            m_axi_rready,
++	input  wire [5:0]                      m_axi_rid,
++	input  wire [31:0]                     m_axi_rdata,
++	input  wire [1:0]                      m_axi_rresp,
++	input  wire                            m_axi_rlast,
++
++	// AXI Cache
++	// AXI Write Channels
++	output wire                            axi_awvalid,
++	input  wire                            axi_awready,
++	output wire [5:0]                      axi_awid,
++	output wire [31:0]                     axi_awaddr,
++	//~ output wire [3:0]                      axi_awregion,
++	output wire [7:0]                      axi_awlen,
++	output wire [2:0]                      axi_awsize,
++	output wire [1:0]                      axi_awburst,
++	//~ output wire                            axi_awlock,
++	output wire [3:0]                      axi_awcache,
++	output wire [2:0]                      axi_awprot,
++	//~ output wire [3:0]                      axi_awqos,
++
++	output wire                            axi_wvalid,
++	input  wire                            axi_wready,
++	output wire [31:0]                     axi_wdata,
++	output wire [3:0]                      axi_wstrb,
++	output wire                            axi_wlast,
++
++	input  wire                            axi_bvalid,
++	output wire                            axi_bready,
++	input  wire [1:0]                      axi_bresp,
++	input  wire [5:0]                      axi_bid,
++
++	// AXI Read Channels
++	output wire                            axi_arvalid,
++	input  wire                            axi_arready,
++	output wire [5:0]                      axi_arid,
++	output wire [31:0]                     axi_araddr,
++	//~ output wire [3:0]                      axi_arregion,
++	output wire [7:0]                      axi_arlen,
++	output wire [2:0]                      axi_arsize,
++	output wire [1:0]                      axi_arburst,
++	//~ output wire                            axi_arlock,
++	output wire [3:0]                      axi_arcache,
++	output wire [2:0]                      axi_arprot,
++	//~ output wire [3:0]                      axi_arqos,
++
++	input  wire                            axi_rvalid,
++	output wire                            axi_rready,
++	input  wire [5:0]                      axi_rid,
++	input  wire [31:0]                     axi_rdata,
++	input  wire [1:0]                      axi_rresp,
++	input  wire                            axi_rlast,
++	
++	output wire        dexie_cf_valid,
++	output wire [31:0] dexie_cf_cur_pc,
++	output wire [31:0] dexie_cf_cur_instruction,
++	output wire [31:0] dexie_cf_next_pc,
++	
++	output wire [31:0] dexie_instruction_pc_dec,
++	output wire [31:0] dexie_instruction_data_dec,
++	output wire        dexie_instruction_issued_dec,
++	
++	output wire [31:0] dexie_df_mem_pc,
++	output wire        dexie_df_mem_load,
++	output wire        dexie_df_mem_store,
++	output wire [31:0] dexie_df_mem_addr,
++	output wire [1:0]  dexie_df_mem_len,
++	output wire [31:0] dexie_df_mem_storedata,
++	output wire        dexie_df_mem_stalling,
++	
++	output wire [31:0] dexie_df_reg_pc,
++	output wire [4:0]  dexie_df_reg_rd_addr,
++	output wire [31:0] dexie_df_reg_rd_val,
++	
++	input wire         dexie_stall,
++	input wire         dexie_df_mem_stallOnStore,
++	input wire         dexie_df_mem_continueStore,
++
++	input logic timer_interrupt,
++	input logic interrupt
++);
++
++local_memory_interface instruction_bram();
++assign instruction_bram_addr = {instruction_bram.addr[27:0],2'b0};
++assign instruction_bram_en = instruction_bram.en;
++assign instruction_bram_we = instruction_bram.be;
++assign instruction_bram_din = instruction_bram.data_in;
++assign instruction_bram.data_out = instruction_bram_dout;
++
++local_memory_interface data_bram();
++assign data_bram_addr = {data_bram.addr[27:0],2'b0};
++assign data_bram_en = data_bram.en;
++assign data_bram_we = data_bram.be;
++assign data_bram_din = data_bram.data_in;
++assign data_bram.data_out = data_bram_dout;
++
++axi_interface m_axi();
++assign m_axi_awvalid = m_axi.awvalid;
++assign m_axi.awready = m_axi_awready;
++assign m_axi_awid = m_axi.awid;
++assign m_axi_awaddr = m_axi.awaddr;
++assign m_axi_awlen = m_axi.awlen;
++assign m_axi_awsize = m_axi.awsize;
++assign m_axi_awburst = m_axi.awburst;
++assign m_axi_awcache = m_axi.awcache;
++
++assign m_axi_wvalid = m_axi.wvalid;
++assign m_axi.wready = m_axi_wready;
++assign m_axi_wdata = m_axi.wdata;
++assign m_axi_wstrb = m_axi.wstrb;
++assign m_axi_wlast = m_axi.wlast;
++
++assign m_axi.bvalid = m_axi_bvalid;
++assign m_axi_bready = m_axi.bready;
++assign m_axi.bresp = m_axi_bresp;
++assign m_axi.bid = m_axi_bid;
++
++assign m_axi_arvalid = m_axi.arvalid;
++assign m_axi.arready = m_axi_arready;
++assign m_axi_arid = m_axi.arid;
++assign m_axi_araddr = m_axi.araddr;
++assign m_axi_arlen = m_axi.arlen;
++assign m_axi_arsize = m_axi.arsize;
++assign m_axi_arburst = m_axi.arburst;
++assign m_axi_arcache = m_axi.arcache;
++
++assign m_axi.rvalid = m_axi_rvalid;
++assign m_axi_rready = m_axi.rready;
++assign m_axi.rid = m_axi_rid;
++assign m_axi.rdata = m_axi_rdata;
++assign m_axi.rresp = m_axi_rresp;
++assign m_axi.rlast = m_axi_rlast;
++
++avalon_interface m_avalon();
++wishbone_interface m_wishbone();
++
++l2_requester_interface l2[L2_NUM_PORTS-1:0]();
++//assign l2[1].request = 0;
++assign l2[1].request_push = 0;
++assign l2[1].wr_data_push = 0;
++assign l2[1].inv_ack = l2[1].inv_valid;
++assign l2[1].rd_data_ack = l2[1].rd_data_valid;
++
++l2_memory_interface arb_mem();
++
++dexie_interface dexie();
++
++assign dexie_cf_valid = dexie.cf_valid;
++assign dexie_cf_cur_pc = dexie.cf_cur_pc;
++assign dexie_cf_cur_instruction = dexie.cf_cur_instruction;
++assign dexie_cf_next_pc = dexie.cf_next_pc;
++
++assign dexie_instruction_pc_dec = dexie.instruction_pc_dec;
++assign dexie_instruction_data_dec = dexie.instruction_data_dec;
++assign dexie_instruction_issued_dec = dexie.instruction_issued_dec;
++
++assign dexie_df_mem_pc            = dexie.df_mem_pc;
++assign dexie_df_mem_load          = dexie.df_mem_load;
++assign dexie_df_mem_store         = dexie.df_mem_store;
++assign dexie_df_mem_addr          = dexie.df_mem_addr;
++assign dexie_df_mem_len           = dexie.df_mem_len;
++assign dexie_df_mem_storedata     = dexie.df_mem_storedata;
++assign dexie_df_mem_stalling      = dexie.df_mem_stalling;
++
++assign dexie_df_reg_pc            = dexie.df_reg_pc;
++assign dexie_df_reg_rd_addr       = dexie.df_reg_rd_addr;
++assign dexie_df_reg_rd_val        = dexie.df_reg_rd_val;
++
++assign dexie.stall                = dexie_stall;
++assign dexie.df_mem_stallOnStore  = dexie_df_mem_stallOnStore;
++assign dexie.df_mem_continueStore = dexie_df_mem_continueStore;
++
++taiga taiga (
++	.clk(clk),
++	.rst(rst),
++
++	.instruction_bram(instruction_bram),
++	.data_bram(data_bram),
++
++	.m_axi(m_axi),
++	.m_avalon(m_avalon),
++	.m_wishbone(m_wishbone),
++	.dexie(dexie),
++	.l2(l2[0]),
++
++	.timer_interrupt(0),
++	.interrupt(0)
++);
++
++l2_arbiter l2_arb (
++	.clk(clk),
++	.rst(rst),
++	.request(l2),
++	.mem(arb_mem)
++);
++
++axi_to_arb l2_to_mem (
++	.clk(clk),
++	.rst(rst),
++	.l2(arb_mem),
++	.* // e.g. axi_*
++);
++
++endmodule
+diff --git a/core/taiga_wrapper_verilog.v b/core/taiga_wrapper_verilog.v
+new file mode 100644
+index 0000000..0616583
+--- /dev/null
++++ b/core/taiga_wrapper_verilog.v
+@@ -0,0 +1,319 @@
++/*
++ * Copyright © 2019 Carsten Heinz
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++module taiga_wrapper_verilog (
++	input wire clk,
++	input wire rst,
++
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 instruction_bram CLK" *)
++	output wire        instruction_bram_clk,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 instruction_bram RST" *)
++	output wire        instruction_bram_rst,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 instruction_bram ADDR" *)
++	output wire [29:0] instruction_bram_addr,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 instruction_bram EN" *)
++	output wire        instruction_bram_en,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 instruction_bram WE" *)
++	output wire [3:0]  instruction_bram_we,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 instruction_bram DIN" *)
++	output wire [31:0] instruction_bram_din,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 instruction_bram DOUT" *)
++	input  wire [31:0] instruction_bram_dout,
++
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 data_bram CLK" *)
++	output wire        data_bram_clk,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 data_bram RST" *)
++	output wire        data_bram_rst,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 data_bram ADDR" *)
++	output wire [29:0] data_bram_addr,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 data_bram EN" *)
++	output wire        data_bram_en,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 data_bram WE" *)
++	output wire [3:0]  data_bram_we,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 data_bram DIN" *)
++	output wire [31:0] data_bram_din,
++	(* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 data_bram DOUT" *)
++	input  wire [31:0] data_bram_dout,
++
++	// AXI Bus
++	// AXI Write Channels
++	output wire                            m_axi_awvalid,
++	input  wire                            m_axi_awready,
++	//~ output wire [5:0]                      m_axi_awid,
++	output wire [31:0]                     m_axi_awaddr,
++	//~ output wire [3:0]                      m_axi_awregion,
++	output wire [7:0]                      m_axi_awlen,
++	output wire [2:0]                      m_axi_awsize,
++	output wire [1:0]                      m_axi_awburst,
++	//~ output wire                            m_axi_awlock,
++	output wire [3:0]                      m_axi_awcache,
++	//~ output wire [2:0]                      m_axi_awprot,
++	//~ output wire [3:0]                      m_axi_awqos,
++
++	output wire                            m_axi_wvalid,
++	input  wire                            m_axi_wready,
++	output wire [31:0]                     m_axi_wdata,
++	output wire [3:0]                      m_axi_wstrb,
++	output wire                            m_axi_wlast,
++
++	input  wire                            m_axi_bvalid,
++	output wire                            m_axi_bready,
++	input  wire [1:0]                      m_axi_bresp,
++	//~ input  wire [5:0]                      m_axi_bid,
++
++	// AXI Read Channels
++	output wire                            m_axi_arvalid,
++	input  wire                            m_axi_arready,
++	//~ output wire [5:0]                      m_axi_arid,
++	output wire [31:0]                     m_axi_araddr,
++	//~ output wire [3:0]                      m_axi_arregion,
++	output wire [7:0]                      m_axi_arlen,
++	output wire [2:0]                      m_axi_arsize,
++	output wire [1:0]                      m_axi_arburst,
++	//~ output wire                            m_axi_arlock,
++	output wire [3:0]                      m_axi_arcache,
++	//~ output wire [2:0]                      m_axi_arprot,
++	//~ output wire [3:0]                      m_axi_arqos,
++
++	input  wire                            m_axi_rvalid,
++	output wire                            m_axi_rready,
++	//~ input  wire [5:0]                      m_axi_rid,
++	input  wire [31:0]                     m_axi_rdata,
++	input  wire [1:0]                      m_axi_rresp,
++	input  wire                            m_axi_rlast,
++
++	// AXI Cache
++	// AXI Write Channels
++	output wire                            m_axi_cache_awvalid,
++	input  wire                            m_axi_cache_awready,
++	output wire [5:0]                      m_axi_cache_awid,
++	output wire [31:0]                     m_axi_cache_awaddr,
++	//~ output wire [3:0]                      m_axi_cache_awregion,
++	output wire [7:0]                      m_axi_cache_awlen,
++	output wire [2:0]                      m_axi_cache_awsize,
++	output wire [1:0]                      m_axi_cache_awburst,
++	//~ output wire                            m_axi_cache_awlock,
++	output wire [3:0]                      m_axi_cache_awcache,
++	output wire [2:0]                      m_axi_cache_awprot,
++	//~ output wire [3:0]                      m_axi_cache_awqos,
++
++	output wire                            m_axi_cache_wvalid,
++	input  wire                            m_axi_cache_wready,
++	output wire [31:0]                     m_axi_cache_wdata,
++	output wire [3:0]                      m_axi_cache_wstrb,
++	output wire                            m_axi_cache_wlast,
++
++	input  wire                            m_axi_cache_bvalid,
++	output wire                            m_axi_cache_bready,
++	input  wire [1:0]                      m_axi_cache_bresp,
++	input  wire [5:0]                      m_axi_cache_bid,
++
++	// AXI Read Channels
++	output wire                            m_axi_cache_arvalid,
++	input  wire                            m_axi_cache_arready,
++	output wire [5:0]                      m_axi_cache_arid,
++	output wire [31:0]                     m_axi_cache_araddr,
++	//~ output wire [3:0]                      m_axi_cache_arregion,
++	output wire [7:0]                      m_axi_cache_arlen,
++	output wire [2:0]                      m_axi_cache_arsize,
++	output wire [1:0]                      m_axi_cache_arburst,
++	//~ output wire                            m_axi_cache_arlock,
++	output wire [3:0]                      m_axi_cache_arcache,
++	output wire [2:0]                      m_axi_cache_arprot,
++	//~ output wire [3:0]                      m_axi_cache_arqos,
++
++	input  wire                            m_axi_cache_rvalid,
++	output wire                            m_axi_cache_rready,
++	input  wire [5:0]                      m_axi_cache_rid,
++	input  wire [31:0]                     m_axi_cache_rdata,
++	input  wire [1:0]                      m_axi_cache_rresp,
++	input  wire                            m_axi_cache_rlast,
++	
++	output wire                            dexie_cf_valid,
++	output wire [31:0]                     dexie_cf_cur_pc,
++	output wire [31:0]                     dexie_cf_cur_instruction,
++	output wire [31:0]                     dexie_cf_next_pc,
++	
++	output wire [31:0]                     dexie_instruction_pc_dec,
++	output wire [31:0]                     dexie_instruction_data_dec,
++	output wire                            dexie_instruction_issued_dec,
++	
++	output wire [31:0]                     dexie_df_mem_pc,
++	output wire                            dexie_df_mem_load,
++	output wire                            dexie_df_mem_store,
++	output wire [31:0]                     dexie_df_mem_addr,
++	output wire [1:0]                      dexie_df_mem_len,
++	output wire [31:0]                     dexie_df_mem_storedata,
++	output wire                            dexie_df_mem_stalling,
++	
++	output wire [31:0]                     dexie_df_reg_pc,
++	output wire [4:0]                      dexie_df_reg_rd_addr,
++	output wire [31:0]                     dexie_df_reg_rd_val,
++	
++	input wire                             dexie_stall,
++	input wire                             dexie_df_mem_stallOnStore,
++	input wire                             dexie_df_mem_continueStore,
++	
++	input  wire                            irq
++);
++
++assign instruction_bram_clk = clk;
++assign instruction_bram_rst = rst;
++assign data_bram_clk = clk;
++assign data_bram_rst = rst;
++
++wire [5:0]                      m_axi_awid;
++wire [5:0]                      m_axi_bid;
++wire [5:0]                      m_axi_arid;
++wire [5:0]                      m_axi_rid;
++
++
++taiga_wrapper taiga_wrapper (
++	.clk(clk),
++	.rst(rst),
++
++	.instruction_bram_addr(instruction_bram_addr),
++	.instruction_bram_en(instruction_bram_en),
++	.instruction_bram_we(instruction_bram_we),
++	.instruction_bram_din(instruction_bram_din),
++	.instruction_bram_dout(instruction_bram_dout),
++
++	.data_bram_addr(data_bram_addr),
++	.data_bram_en(data_bram_en),
++	.data_bram_we(data_bram_we),
++	.data_bram_din(data_bram_din),
++	.data_bram_dout(data_bram_dout),
++
++	// AXI Bus
++	.m_axi_awvalid(m_axi_awvalid),
++	.m_axi_awready(m_axi_awready),
++	.m_axi_awid(m_axi_awid),
++	.m_axi_awaddr(m_axi_awaddr),
++	//~ .m_axi_awregion(m_axi_awregion),
++	.m_axi_awlen(m_axi_awlen),
++	.m_axi_awsize(m_axi_awsize),
++	.m_axi_awburst(m_axi_awburst),
++	//~ .m_axi_awlock(m_axi_awlock),
++	.m_axi_awcache(m_axi_awcache),
++	//~ .m_axi_awprot(m_axi_awprot),
++	//~ .m_axi_awqos(m_axi_awqos),
++
++	.m_axi_wvalid(m_axi_wvalid),
++	.m_axi_wready(m_axi_wready),
++	.m_axi_wdata(m_axi_wdata),
++	.m_axi_wstrb(m_axi_wstrb),
++	.m_axi_wlast(m_axi_wlast),
++
++	.m_axi_bvalid(m_axi_bvalid),
++	.m_axi_bready(m_axi_bready),
++	.m_axi_bresp(m_axi_bresp),
++	.m_axi_bid(m_axi_bid),
++
++	.m_axi_arvalid(m_axi_arvalid),
++	.m_axi_arready(m_axi_arready),
++	.m_axi_arid(m_axi_arid),
++	.m_axi_araddr(m_axi_araddr),
++	//~ .m_axi_arregion(m_axi_arregion),
++	.m_axi_arlen(m_axi_arlen),
++	.m_axi_arsize(m_axi_arsize),
++	.m_axi_arburst(m_axi_arburst),
++	//~ .m_axi_arlock(m_axi_arlock),
++	.m_axi_arcache(m_axi_arcache),
++	//~ .m_axi_arprot(m_axi_arprot),
++	//~ .m_axi_arqos(m_axi_arqos),
++
++	.m_axi_rvalid(m_axi_rvalid),
++	.m_axi_rready(m_axi_rready),
++	.m_axi_rid(m_axi_rid),
++	.m_axi_rdata(m_axi_rdata),
++	.m_axi_rresp(m_axi_rresp),
++	.m_axi_rlast(m_axi_rlast),
++
++	// AXI Cache
++	.axi_awvalid(m_axi_cache_awvalid),
++	.axi_awready(m_axi_cache_awready),
++	.axi_awid(m_axi_cache_awid),
++	.axi_awaddr(m_axi_cache_awaddr),
++	//~ .axi_awregion(m_axi_cache_awregion),
++	.axi_awlen(m_axi_cache_awlen),
++	.axi_awsize(m_axi_cache_awsize),
++	.axi_awburst(m_axi_cache_awburst),
++	//~ .axi_awlock(m_axi_cache_awlock),
++	.axi_awcache(m_axi_cache_awcache),
++	.axi_awprot(m_axi_cache_awprot),
++	//~ .axi_awqos(m_axi_cache_awqos),
++
++	.axi_wvalid(m_axi_cache_wvalid),
++	.axi_wready(m_axi_cache_wready),
++	.axi_wdata(m_axi_cache_wdata),
++	.axi_wstrb(m_axi_cache_wstrb),
++	.axi_wlast(m_axi_cache_wlast),
++
++	.axi_bvalid(m_axi_cache_bvalid),
++	.axi_bready(m_axi_cache_bready),
++	.axi_bresp(m_axi_cache_bresp),
++	.axi_bid(m_axi_cache_bid),
++
++	.axi_arvalid(m_axi_cache_arvalid),
++	.axi_arready(m_axi_cache_arready),
++	.axi_arid(m_axi_cache_arid),
++	.axi_araddr(m_axi_cache_araddr),
++	//~ .axi_arregion(m_axi_cache_arregion),
++	.axi_arlen(m_axi_cache_arlen),
++	.axi_arsize(m_axi_cache_arsize),
++	.axi_arburst(m_axi_cache_arburst),
++	//~ .axi_arlock(m_axi_cache_arlock),
++	.axi_arcache(m_axi_cache_arcache),
++	.axi_arprot(m_axi_cache_arprot),
++	//~ .axi_arqos(m_axi_cache_arqos),
++
++	.axi_rvalid(m_axi_cache_rvalid),
++	.axi_rready(m_axi_cache_rready),
++	.axi_rid(m_axi_cache_rid),
++	.axi_rdata(m_axi_cache_rdata),
++	.axi_rresp(m_axi_cache_rresp),
++	.axi_rlast(m_axi_cache_rlast),
++	
++	.dexie_cf_valid          (dexie_cf_valid),
++	.dexie_cf_cur_pc         (dexie_cf_cur_pc),
++	.dexie_cf_cur_instruction(dexie_cf_cur_instruction),
++	.dexie_cf_next_pc        (dexie_cf_next_pc),
++	
++	.dexie_instruction_pc_dec    (dexie_instruction_pc_dec),
++	.dexie_instruction_data_dec  (dexie_instruction_data_dec),
++	.dexie_instruction_issued_dec(dexie_instruction_issued_dec),
++	
++	.dexie_df_mem_pc           (dexie_df_mem_pc           ),
++	.dexie_df_mem_load         (dexie_df_mem_load         ),
++	.dexie_df_mem_store        (dexie_df_mem_store        ),
++	.dexie_df_mem_addr         (dexie_df_mem_addr         ),
++	.dexie_df_mem_len          (dexie_df_mem_len          ),
++	.dexie_df_mem_storedata    (dexie_df_mem_storedata    ),
++	.dexie_df_mem_stalling     (dexie_df_mem_stalling     ),
++	
++	.dexie_df_reg_pc           (dexie_df_reg_pc           ),
++	.dexie_df_reg_rd_addr      (dexie_df_reg_rd_addr      ),
++	.dexie_df_reg_rd_val       (dexie_df_reg_rd_val       ),
++	
++	.dexie_stall               (dexie_stall               ),
++	.dexie_df_mem_stallOnStore (dexie_df_mem_stallOnStore ),
++	.dexie_df_mem_continueStore(dexie_df_mem_continueStore),
++	
++	.timer_interrupt(0),
++	.interrupt(irq)
++);
++
++endmodule
+diff --git a/core/write_back.sv b/core/write_back.sv
+index e59fda2..aba901e 100755
+--- a/core/write_back.sv
++++ b/core/write_back.sv
+@@ -45,7 +45,12 @@ module write_back(
+         input logic [31:0] store_data,
+ 
+         //Trace signals
+-        output logic tr_wb_mux_contention
++        output logic tr_wb_mux_contention,
++        
++        //DExIE signals
++        output logic [31:0] dexie_df_reg_pc,
++        output logic [4:0] dexie_df_reg_rd_addr,
++        output logic [31:0] dexie_df_reg_rd_val
+         );
+     //////////////////////////////////////
+ 
+@@ -57,12 +62,14 @@ module write_back(
+     logic [NUM_WB_UNITS-1:0] unit_done;
+     //Force usage of f7 muxes
+     (* keep = "true" *) logic [XLEN-1:0] unit_rd [2*NUM_WB_UNITS-1:0];
++    logic [31:0] unit_pc [NUM_WB_UNITS-1:0]; //PC values from the writeback interfaces. Added for DExIE.
+     //Per-ID muxes for commit buffer
+     logic [$clog2(NUM_WB_UNITS)-1:0] id_unit_select [MAX_INFLIGHT_COUNT-1:0];
+     logic [$clog2(NUM_WB_UNITS)-1:0] id_unit_select_r [MAX_INFLIGHT_COUNT-1:0];
+     //Commit buffer
+     logic [XLEN-1:0] results_by_id [MAX_INFLIGHT_COUNT-1:0];
+     logic [XLEN-1:0] results_by_id_new [MAX_INFLIGHT_COUNT-1:0];
++    logic [31:0] pc_by_id [MAX_INFLIGHT_COUNT-1:0]; //PC values for all inflight instructions. Added for DExIE.
+     instruction_id_t id_retiring;
+     inflight_instruction_packet retiring_instruction_packet;
+ 
+@@ -86,6 +93,7 @@ module write_back(
+             assign unit_instruction_id[i] = unit_wb[i].id;
+             assign unit_done[i] = unit_wb[i].done;
+             assign unit_rd[i] = unit_wb[i].rd;
++            assign unit_pc[i] = unit_wb[i].pc; //Added for DExIE.
+         end
+         for (i=NUM_WB_UNITS; i< 2*NUM_WB_UNITS; i++) begin
+             assign unit_rd[i] = store_data;
+@@ -136,11 +144,13 @@ module write_back(
+         store_mux = 0;
+         store_mux[ti.issue_id] = store_issued_with_data;
+     end
+-
++    
+     generate for (i=0; i< MAX_INFLIGHT_COUNT; i++) begin
+         always_ff @ (posedge clk) begin
+-            if (id_writing_to_buffer[i] |store_mux[i])
++            if (id_writing_to_buffer[i] |store_mux[i]) begin
++                pc_by_id[i] <= unit_pc[id_unit_select[i]]; //Added for DExIE.
+                 results_by_id[i] <= unit_rd[{store_mux[i],id_unit_select[i]}];
++            end
+         end
+     end endgenerate
+ 
+@@ -174,7 +184,8 @@ module write_back(
+     end
+     //Inflight Instruction ID table
+     //Stores rd_addr and whether instruction is a store
+-    always_ff @ (posedge clk) begin
++    //Workaround: Use always instead of always_ff since the Questa simulator does not like the initial block otherwise.
++    always @ (posedge clk) begin
+         if (ti.id_available)
+             id_metadata[ti.issue_id] <= ti.inflight_packet;
+     end
+@@ -213,6 +224,13 @@ module write_back(
+     assign rf_wb.retiring = instruction_complete;
+     assign rf_wb.rd_nzero = |retiring_instruction_packet.rd_addr;
+     assign rf_wb.rd_data = results_by_id[id_retiring];
++    
++    //Assign the DExIE DF writeback signals for the retiring instruction.
++    assign dexie_df_reg_pc = pc_by_id[id_retiring];
++    //If no instruction is retiring, use the zero register number to mark the PC and write data signals as invalid.
++    assign dexie_df_reg_rd_addr = instruction_complete ? rf_wb.rd_addr : 5'd0;
++    //Use the write data from the Register File inputs.
++    assign dexie_df_reg_rd_val = rf_wb.rd_data;
+ 
+     //Register bypass for issue operands
+     assign rf_wb.rs1_valid = id_writeback_pending_r[rf_wb.rs1_id];//includes the instruction writing to the register file

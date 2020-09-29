@@ -1,0 +1,2 @@
+The diff file in this folder is for commit f39b2d8 of the Orca mirror repository (see riscv/orca/setup.sh in the tapasco-riscv repository).
+This folder already contains all raw source files. Changes to the output/input signals must also be applied to component.xml (manually or through a Vivado import and export).

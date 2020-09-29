@@ -1,0 +1,716 @@
+diff --git a/src_Core/CPU/CPU.bsv b/src_Core/CPU/CPU.bsv
+index bbba334..ae6eb75 100644
+--- a/src_Core/CPU/CPU.bsv
++++ b/src_Core/CPU/CPU.bsv
+@@ -41,6 +41,11 @@ import AXI4_Types :: *;
+ import ISA_Decls :: *;
+ 
+ import TV_Info   :: *;
++ 
++`ifdef INCLUDE_DEXIE_TAP
++import DExIE_Info      :: *;
++`endif
++
+ 
+ import GPR_RegFile :: *;
+ `ifdef ISA_F
+@@ -278,6 +283,26 @@ module mkCPU (CPU_IFC);
+    Reg #(WordXL) rg_prev_mip <- mkReg (0);
+ `endif
+ 
++`ifdef INCLUDE_DEXIE_TAP
++   //Output to DExIE: Control flow data (PC, Instruction, Next PC). From Stage 1 (Execute) except for special instructions.
++   FIFOF #(Dexie_CFData) f_dexie_cfdata <- mkBypassFIFOF;
++   //Output to DExIE: Dataflow memory load/store data. From Stage 1 (Execute).
++   FIFOF #(Dexie_DFMemData) f_dexie_dfmemdata <- mkBypassFIFOF;
++   //Output to DExIE: Dataflow register write data. From Stage 2 (Data Memory).
++   FIFOF #(Dexie_DFRegData) f_dexie_dfregdata <- mkBypassFIFOF;
++   
++   //Input from DExIE: Stall before memory and writeback (stage 1->2 and 2->3).
++   Wire #(Bool) w_dexie_stall <- mkWire; 
++   //Input from DExIE: Stall stores before memory (stage 1->2).
++   Wire #(Bool) w_dexie_stallOnStore <- mkWire;
++   //Input from DExIE: Continue stores stalled by stallOnStore.
++   Wire #(Bool) w_dexie_continueStore <- mkWire;
++`else
++   Bool w_dexie_stall = False;
++   Bool w_dexie_stallOnStore = False;
++   Bool w_dexie_continueStore = False;
++`endif
++
+    function Bool mip_cmd_needed ();
+ `ifdef INCLUDE_TANDEM_VERIF
+       // If the MTIP, MSIP, or xEIP bits of MIP have changed, then send a MIP update
+@@ -637,7 +662,18 @@ module mkCPU (CPU_IFC);
+       // ----------------
+       // Move instruction from Stage2 to Stage3
+ 
+-      if ((! stage3_full) && (stage2.out.ostatus == OSTATUS_PIPE)) begin
++      if ((! stage3_full) && (stage2.out.ostatus == OSTATUS_PIPE) && !w_dexie_stall) begin
++`ifdef INCLUDE_DEXIE_TAP
++	 if (stage2.out.data_to_stage3.rd_valid) begin
++	    //Store the relevant writeback data for DExIE (PC, rd address, rd write value).
++		let dexie_data = Dexie_DFRegData {
++	       pc    : stage2.out.data_to_stage3.pc,
++	       r_dest: stage2.out.data_to_stage3.rd,
++	       r_data: stage2.out.data_to_stage3.rd_val
++	    };
++	    f_dexie_dfregdata.enq(dexie_data);
++	 end
++`endif
+ 	 stage3.enq (stage2.out.data_to_stage3);  stage3_full = True;
+ 	 stage2.deq;                              stage2_full = False;
+ 
+@@ -655,7 +691,8 @@ module mkCPU (CPU_IFC);
+ 
+       if (   (! halting)
+ 	  && (! stage2_full)
+-	  && (stage1.out.ostatus == OSTATUS_PIPE))
++	  && (stage1.out.ostatus == OSTATUS_PIPE)
++	  && !w_dexie_stall)
+ 	 begin
+ 	    if (stage1.out.control == CONTROL_DISCARD) begin
+ 	       stage2_full = False;
+@@ -664,12 +701,49 @@ module mkCPU (CPU_IFC);
+ 		  $display ("    rl_pipe: Discarding stage1 due to redirection");
+ 	    end
+ 	    else if ((! stage1.out.redirect) || (stageF.out.ostatus != OSTATUS_BUSY)) begin
+-	       stage2.enq (stage1.out.data_to_stage2);  stage2_full = True;
+-	       stage1.deq;                              stage1_full = False;
+-
+-	       if (stage1.out.redirect) begin
+-		  rg_next_pc <= stage1.out.next_pc;
+-		  redirect    = True;
++`ifdef INCLUDE_DEXIE_TAP
++	       //Store the relevant memory load/store data for DExIE.
++	       //PC, Memory address, operation length are valid for both Load and Store ops.
++	       //The value to store is invalid for loads.
++	       let dexie_data = Dexie_DFMemData {
++		  pc      : stage1.out.data_to_stage2.pc,
++		  load    : False,
++		  store   : False,
++		  addr    : stage1.out.data_to_stage2.addr,
++		  len     : instr_funct3(stage1.out.data_to_stage2.instr)[1:0],
++		  storeval: stage1.out.data_to_stage2.val2,
++		  stalling: False
++	       };
++	       //Ignore AMOs for now.
++	       if (stage1.out.data_to_stage2.op_stage2 == OP_Stage2_LD)
++	       begin
++		  //Load operations can't stall.
++		  dexie_data.load = True;
++		  dexie_data.store = False;
++		  dexie_data.stalling = False;
++		  f_dexie_dfmemdata.enq(dexie_data);
++	       end
++	       else if (stage1.out.data_to_stage2.op_stage2 == OP_Stage2_ST)
++	       begin
++		  //Stall store operations if stall on store is set and continue store is not set.
++		  dexie_data.load = False;
++		  dexie_data.store = True;
++		  dexie_data.stalling = w_dexie_stallOnStore && !w_dexie_continueStore;
++		  f_dexie_dfmemdata.enq(dexie_data);
++	       end
++	       Bool stalling = dexie_data.stalling;
++`else
++	       Bool stalling = False;
++`endif
++	       //Enforce stall on store.
++	       if (!stalling) begin  
++		  stage2.enq (stage1.out.data_to_stage2);  stage2_full = True;
++		  stage1.deq;                              stage1_full = False;
++
++		  if (stage1.out.redirect) begin
++		     rg_next_pc <= stage1.out.next_pc;
++		     redirect    = True;
++		  end
+ 	       end
+ 	    end
+ 	 end
+@@ -699,8 +773,21 @@ module mkCPU (CPU_IFC);
+ 	 begin
+ 	    CF_Info cf_info = cf_info_none;
+ 	    if (   (stage1.out.ostatus == OSTATUS_PIPE)
+-		&& (stage1.out.control != CONTROL_DISCARD))
++		&& (stage1.out.control != CONTROL_DISCARD)) begin
+ 	       cf_info = stage1.out.cf_info;
++`ifdef INCLUDE_DEXIE_TAP
++	       //Collect the CF data (PC, Instruction, Next PC) from Stage 1 (Execute).
++	       //In case of branch misprediction, the instruction for next_pc will be loaded by the fetch stage.
++	       //Otherwise, the next instruction is about to enter Stage 1 (Execute).
++	       let dexie_data = Dexie_CFData {
++		  pc      : stage1.out.data_to_stage2.pc,
++		  instr   : stage1.out.data_to_stage2.instr,
++		  next_pc : stage1.out.next_pc
++	       };
++	       f_dexie_cfdata.enq(dexie_data);
++	       $display("Flute Dexie_CFData : pc %0h  instr %0h  next_pc %0h", dexie_data.pc, dexie_data.instr, dexie_data.next_pc);
++`endif
++	    end
+ 
+ 	    if (redirect)
+ 	       rg_state <= CPU_START_TRAP_HANDLER;
+@@ -821,6 +908,15 @@ module mkCPU (CPU_IFC);
+       // csr_regfile.csr_minstret_incr;
+ 
+       // Tandem Verification and Debug related actions
++`ifdef INCLUDE_DEXIE_TAP
++      //Collect the CF data (PC, Instruction, Next PC) for traps.
++      let dexie_data = Dexie_CFData {
++        pc      : epc,
++        instr   : instr,
++        next_pc : next_pc
++      };
++      f_dexie_cfdata.enq(dexie_data);
++`endif
+ `ifdef INCLUDE_TANDEM_VERIF
+       // Trace data
+       Trace_Data trace_data;
+@@ -949,6 +1045,15 @@ module mkCPU (CPU_IFC);
+ 	 // Restart the pipe
+ 	 rg_state   <= CPU_CSRRX_RESTART;
+ 
++`ifdef INCLUDE_DEXIE_TAP
++	 //Collect the CF data (PC, Instruction, Next PC) for CSRRW / CSRRWI instructions.
++	 let dexie_data = Dexie_CFData {
++	   pc      : rg_csr_pc,
++	   instr   : rg_trap_instr,
++	   next_pc : rg_next_pc
++	 };
++	 f_dexie_cfdata.enq(dexie_data);
++`endif
+ `ifdef INCLUDE_TANDEM_VERIF
+ 	 // Trace data
+ 	 let trace_data = mkTrace_CSRRX (rg_trap_trace_data.pc,
+@@ -1069,6 +1174,15 @@ module mkCPU (CPU_IFC);
+ 	 // Restart the pipe
+ 	 rg_state   <= CPU_CSRRX_RESTART;
+ 
++`ifdef INCLUDE_DEXIE_TAP
++	 //Collect the CF data (PC, Instruction, Next PC) for CSRRS(I)/CSRRC(I) instructions.
++	 let dexie_data = Dexie_CFData {
++	   pc      : rg_csr_pc,
++	   instr   : rg_trap_instr,
++	   next_pc : rg_next_pc
++	 };
++	 f_dexie_cfdata.enq(dexie_data);
++`endif
+ `ifdef INCLUDE_TANDEM_VERIF
+ 	 // Trace data
+ 	 let trace_data = mkTrace_CSRRX (rg_trap_trace_data.pc,
+@@ -1142,6 +1256,15 @@ module mkCPU (CPU_IFC);
+       // Accounting
+       csr_regfile.csr_minstret_incr;
+ 
++`ifdef INCLUDE_DEXIE_TAP
++      //Collect the CF data (PC, Instruction, Next PC) for MRET/SRET/URET instructions.
++      let dexie_data = Dexie_CFData {
++        pc      : stage1.out.data_to_stage2.pc,
++        instr   : stage1.out.data_to_stage2.instr,
++        next_pc : next_pc
++      };
++      f_dexie_cfdata.enq(dexie_data);
++`endif
+ `ifdef INCLUDE_TANDEM_VERIF
+       // Trace data
+       let td  = stage1.out.data_to_stage2.trace_data;
+@@ -1175,6 +1298,15 @@ module mkCPU (CPU_IFC);
+       // Accounting
+       csr_regfile.csr_minstret_incr;
+ 
++`ifdef INCLUDE_DEXIE_TAP
++      //Collect the CF data (PC, Instruction, Next PC) for FENCE.I instructions.
++      let dexie_data = Dexie_CFData {
++        pc      : stage1.out.data_to_stage2.pc,
++        instr   : stage1.out.data_to_stage2.instr,
++        next_pc : stage1.out.next_pc
++      };
++      f_dexie_cfdata.enq(dexie_data);
++`endif
+ `ifdef INCLUDE_TANDEM_VERIF
+       // Trace data
+       let trace_data = stage1.out.data_to_stage2.trace_data;
+@@ -1224,6 +1356,15 @@ module mkCPU (CPU_IFC);
+       // Accounting
+       csr_regfile.csr_minstret_incr;
+ 
++`ifdef INCLUDE_DEXIE_TAP
++      //Collect the CF data (PC, Instruction, Next PC) for FENCE instructions.
++      let dexie_data = Dexie_CFData {
++        pc      : stage1.out.data_to_stage2.pc,
++        instr   : stage1.out.data_to_stage2.instr,
++        next_pc : stage1.out.next_pc
++      };
++      f_dexie_cfdata.enq(dexie_data);
++`endif
+ `ifdef INCLUDE_TANDEM_VERIF
+       // Trace data
+       let trace_data = stage1.out.data_to_stage2.trace_data;
+@@ -1282,6 +1423,15 @@ module mkCPU (CPU_IFC);
+       // Accounting
+       csr_regfile.csr_minstret_incr;
+ 
++`ifdef INCLUDE_DEXIE_TAP
++      //Collect the CF data (PC, Instruction, Next PC) for SFENCE.VMA instructions.
++      let dexie_data = Dexie_CFData {
++        pc      : stage1.out.data_to_stage2.pc,
++        instr   : stage1.out.data_to_stage2.instr,
++        next_pc : stage1.out.next_pc
++      };
++      f_dexie_cfdata.enq(dexie_data);
++`endif
+ `ifdef INCLUDE_TANDEM_VERIF
+       // Trace data
+       let trace_data = stage1.out.data_to_stage2.trace_data;
+@@ -1332,6 +1482,15 @@ module mkCPU (CPU_IFC);
+       // Accounting
+       csr_regfile.csr_minstret_incr;
+ 
++`ifdef INCLUDE_DEXIE_TAP
++      //Collect the CF data (PC, Instruction, Next PC) for WFI instructions.
++      let dexie_data = Dexie_CFData {
++        pc      : stage1.out.data_to_stage2.pc,
++        instr   : stage1.out.data_to_stage2.instr,
++        next_pc : stage1.out.next_pc
++      };
++      f_dexie_cfdata.enq(dexie_data);
++`endif
+ `ifdef INCLUDE_TANDEM_VERIF
+       // Trace data
+       let trace_data = stage1.out.data_to_stage2.trace_data;
+@@ -1721,6 +1880,21 @@ module mkCPU (CPU_IFC);
+       cfg_logdelay  <= logdelay;
+    endmethod
+ 
++   // ----------------
++   // Optional DExIE stall input
++   
++`ifdef INCLUDE_DEXIE_TAP
++   method Action dexie_stall (Bool set_or_clear);
++      w_dexie_stall <= set_or_clear;
++   endmethod
++   method Action dexie_stallOnStore (Bool set_or_clear);
++      w_dexie_stallOnStore <= set_or_clear;
++   endmethod
++   method Action dexie_continueStore (Bool set_or_clear);
++      w_dexie_continueStore <= set_or_clear;
++   endmethod
++`endif
++
+    // ----------------
+    // Optional interface to Tandem Verifier
+ 
+@@ -1728,6 +1902,15 @@ module mkCPU (CPU_IFC);
+    interface Get  trace_data_out = toGet (f_trace_data);
+ `endif
+ 
++   // ----------------
++   // Optional interface to DExIE
++   
++`ifdef INCLUDE_DEXIE_TAP
++   interface Get  dexie_cfdata_out    = toGet (f_dexie_cfdata);
++   interface Get  dexie_dfmemdata_out = toGet (f_dexie_dfmemdata);
++   interface Get  dexie_dfregdata_out = toGet (f_dexie_dfregdata);
++`endif
++
+    // ----------------
+    // Optional interface to Debug Module
+ 
+diff --git a/src_Core/CPU/CPU_IFC.bsv b/src_Core/CPU/CPU_IFC.bsv
+index 0867322..82f995f 100644
+--- a/src_Core/CPU/CPU_IFC.bsv
++++ b/src_Core/CPU/CPU_IFC.bsv
+@@ -24,6 +24,10 @@ import DM_CPU_Req_Rsp :: *;
+ import TV_Info         :: *;
+ `endif
+ 
++`ifdef INCLUDE_DEXIE_TAP
++import DExIE_Info      :: *;
++`endif
++
+ // ================================================================
+ // CPU interface
+ 
+@@ -76,6 +80,28 @@ interface CPU_IFC;
+    interface Get #(Trace_Data)  trace_data_out;
+ `endif
+ 
++   // ----------------
++   // Optional interface to DExIE
++   
++`ifdef INCLUDE_DEXIE_TAP
++   //Output to DExIE: Control flow data (PC, Instruction, Next PC). From Stage 1 (Execute) except for special instructions.
++   interface Get #(Dexie_CFData)     dexie_cfdata_out;
++   //Output to DExIE: Dataflow memory load/store data. From Stage 1 (Execute).
++   interface Get #(Dexie_DFMemData)  dexie_dfmemdata_out;
++   //Output to DExIE: Dataflow register write data. From Stage 2 (Data Memory).
++   interface Get #(Dexie_DFRegData)  dexie_dfregdata_out;
++   
++   //Input from DExIE: Stall before memory and writeback (stage 1->2 and 2->3).
++   (* always_ready, always_enabled *)
++   method Action dexie_stall (Bool set_or_clear);
++   //Input from DExIE: Stall stores before memory (stage 1->2).
++   (* always_ready, always_enabled *)
++   method Action dexie_stallOnStore (Bool set_or_clear);
++   //Input from DExIE: Continue stores stalled by stallOnStore.
++   (* always_ready, always_enabled *)
++   method Action dexie_continueStore (Bool set_or_clear);
++`endif
++
+    // ----------------
+    // Optional interface to Debug Module
+ 
+diff --git a/src_Core/Core/Core.bsv b/src_Core/Core/Core.bsv
+index 2708b87..fe6b574 100644
+--- a/src_Core/Core/Core.bsv
++++ b/src_Core/Core/Core.bsv
+@@ -96,10 +96,12 @@ module mkCore (Core_IFC #(N_External_Interrupt_Sources));
+    FIFOF #(Bool) f_reset_rsps <- mkFIFOF;
+ 
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifndef TANDEM_VERIF_DIRECT //Modified for DExIE
+    // The TV encoder transforms Trace_Data structures produced by the CPU and DM
+    // into encoded byte vectors for transmission to the Tandem Verifier
+    TV_Encode_IFC tv_encode <- mkTV_Encode;
+ `endif
++`endif
+ 
+ `ifdef INCLUDE_GDB_CONTROL
+    // Debug Module
+@@ -190,6 +192,9 @@ module mkCore (Core_IFC #(N_External_Interrupt_Sources));
+ 
+ `ifdef INCLUDE_GDB_CONTROL
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifdef TANDEM_VERIF_DIRECT //Modified for DExIE
++	NOT_SUPPORTED; //The direct verifier interface does not work with GDB.
++`endif
+    // BEGIN SECTION: GDB and TV
+    // ----------------------------------------------------------------
+    // DM and TV both present. We instantiate 'taps' into connections
+@@ -292,6 +297,7 @@ module mkCore (Core_IFC #(N_External_Interrupt_Sources));
+    dm_master_local = dummy_AXI4_Master_ifc;
+ 
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifndef TANDEM_VERIF_DIRECT
+    // ----------------------------------------------------------------
+    // BEGIN SECTION: no GDB, TV
+ 
+@@ -299,6 +305,7 @@ module mkCore (Core_IFC #(N_External_Interrupt_Sources));
+    mkConnection (cpu.trace_data_out, tv_encode.trace_data_in);
+    // END SECTION: no GDB, TV
+ `endif
++`endif
+ `endif
+    // for ifdef INCLUDE_GDB_CONTROL
+ 
+@@ -376,10 +383,28 @@ module mkCore (Core_IFC #(N_External_Interrupt_Sources));
+       cpu.nmi_req (set_not_clear);
+    endmethod
+ 
++   // ----------------
++   // Optional DExIE stall input
++   
++`ifdef INCLUDE_DEXIE_TAP
++   method Action dexie_stall (Bool set_or_clear);
++      cpu.dexie_stall (set_or_clear);
++   endmethod
++   method Action dexie_stallOnStore (Bool set_or_clear);
++      cpu.dexie_stallOnStore (set_or_clear);
++   endmethod
++   method Action dexie_continueStore (Bool set_or_clear);
++      cpu.dexie_continueStore (set_or_clear);
++   endmethod
++`endif
++
+    // ----------------------------------------------------------------
+    // Optional TV interface
+ 
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifdef TANDEM_VERIF_DIRECT //Modified for DExIE
++   interface Get trace_data_out = cpu.trace_data_out;
++`else
+    interface Get tv_verifier_info_get;
+       method ActionValue #(Info_CPU_to_Verifier) get();
+          match { .n, .v } <- tv_encode.tv_vb_out.get;
+@@ -387,6 +412,16 @@ module mkCore (Core_IFC #(N_External_Interrupt_Sources));
+       endmethod
+    endinterface
+ `endif
++`endif
++
++   // ----------------
++   // Optional interface to DExIE
++   
++`ifdef INCLUDE_DEXIE_TAP
++   interface Get dexie_cfdata_out    = cpu.dexie_cfdata_out;
++   interface Get dexie_dfmemdata_out = cpu.dexie_dfmemdata_out;
++   interface Get dexie_dfregdata_out = cpu.dexie_dfregdata_out;
++`endif
+ 
+    // ----------------------------------------------------------------
+    // Optional DM interfaces
+diff --git a/src_Core/Core/Core_IFC.bsv b/src_Core/Core/Core_IFC.bsv
+index 6839ee0..7edfc27 100644
+--- a/src_Core/Core/Core_IFC.bsv
++++ b/src_Core/Core/Core_IFC.bsv
+@@ -33,6 +33,10 @@ import PLIC  :: *;
+ import TV_Info  :: *;
+ `endif
+ 
++`ifdef INCLUDE_DEXIE_TAP
++import DExIE_Info  :: *;
++`endif
++
+ `ifdef INCLUDE_GDB_CONTROL
+ import Debug_Module  :: *;
+ `endif
+@@ -79,8 +83,34 @@ interface Core_IFC #(numeric type t_n_interrupt_sources);
+    // with relevant bytes in locations [0]..[n-1]
+ 
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifdef TANDEM_VERIF_DIRECT //Modified for DExIE
++   interface Get #(Trace_Data)  trace_data_out;
++`else
+    interface Get #(Info_CPU_to_Verifier)  tv_verifier_info_get;
+ `endif
++`endif
++
++   // ----------------
++   // Optional interface to DExIE
++   
++`ifdef INCLUDE_DEXIE_TAP
++   //Output to DExIE: Control flow data (PC, Instruction, Next PC). From Stage 1 (Execute) except for special instructions.
++   interface Get #(Dexie_CFData)     dexie_cfdata_out;
++   //Output to DExIE: Dataflow memory load/store data. From Stage 1 (Execute).
++   interface Get #(Dexie_DFMemData)  dexie_dfmemdata_out;
++   //Output to DExIE: Dataflow register write data. From Stage 2 (Data Memory).
++   interface Get #(Dexie_DFRegData)  dexie_dfregdata_out;
++   
++   //Input from DExIE: Stall before memory and writeback (stage 1->2 and 2->3).
++   (* always_ready, always_enabled *)
++   method Action dexie_stall (Bool set_or_clear);
++   //Input from DExIE: Stall stores before memory (stage 1->2).
++   (* always_ready, always_enabled *)
++   method Action dexie_stallOnStore (Bool set_or_clear);
++   //Input from DExIE: Continue stores stalled by stallOnStore.
++   (* always_ready, always_enabled *)
++   method Action dexie_continueStore (Bool set_or_clear);
++`endif
+ 
+    // ----------------------------------------------------------------
+    // Optional Debug Module interfaces
+diff --git a/src_Core/ISA/DExIE_Info.bsv b/src_Core/ISA/DExIE_Info.bsv
+new file mode 100644
+index 0000000..830bf7f
+--- /dev/null
++++ b/src_Core/ISA/DExIE_Info.bsv
+@@ -0,0 +1,27 @@
++package DExIE_Info;
++
++import ISA_Decls::*;
++
++typedef struct {
++   WordXL    pc;
++   Bit#(32)  instr;
++   WordXL    next_pc;
++} Dexie_CFData deriving (Bits);
++
++typedef struct {
++   WordXL    pc;
++   Bool      load;
++   Bool      store;
++   Addr      addr;
++   Bit#(2)   len;
++   WordXL    storeval;
++   Bool      stalling;
++} Dexie_DFMemData deriving (Bits);
++
++typedef struct {
++   WordXL    pc;
++   Bit#(5)   r_dest;
++   WordXL    r_data;
++} Dexie_DFRegData deriving (Bits);
++
++endpackage
+diff --git a/src_Testbench/SoC/SoC_Map.bsv b/src_Testbench/SoC/SoC_Map.bsv
+index 4042041..c1613fd 100644
+--- a/src_Testbench/SoC/SoC_Map.bsv
++++ b/src_Testbench/SoC/SoC_Map.bsv
+@@ -110,8 +110,8 @@ module mkSoC_Map (SoC_Map_IFC);
+    // ----------------------------------------------------------------
+    // Near_Mem_IO (including CLINT, the core-local interruptor)
+ 
+-   Fabric_Addr near_mem_io_addr_base = 'h_0200_0000;
+-   Fabric_Addr near_mem_io_addr_size = 'h_0000_C000;    // 48K
++   Fabric_Addr near_mem_io_addr_base = 'h_0001_0000;
++   Fabric_Addr near_mem_io_addr_size = 'h_0000_0000;    // 0
+    Fabric_Addr near_mem_io_addr_lim  = near_mem_io_addr_base + near_mem_io_addr_size;
+ 
+    function Bool fn_is_near_mem_io_addr (Fabric_Addr addr);
+@@ -122,7 +122,7 @@ module mkSoC_Map (SoC_Map_IFC);
+    // PLIC
+ 
+    Fabric_Addr plic_addr_base = 'h_0C00_0000;
+-   Fabric_Addr plic_addr_size = 'h_0040_0000;    // 4M
++   Fabric_Addr plic_addr_size = 'h_0000_0000;    // 0
+    Fabric_Addr plic_addr_lim  = plic_addr_base + plic_addr_size;
+ 
+    function Bool fn_is_plic_addr (Fabric_Addr addr);
+@@ -132,8 +132,8 @@ module mkSoC_Map (SoC_Map_IFC);
+    // ----------------------------------------------------------------
+    // UART 0
+ 
+-   Fabric_Addr uart0_addr_base = 'hC000_0000;
+-   Fabric_Addr uart0_addr_size = 'h0000_0080;    // 128
++   Fabric_Addr uart0_addr_base = 'h0010_0000;
++   Fabric_Addr uart0_addr_size = 'h7FF0_0080;    // 2G
+    Fabric_Addr uart0_addr_lim  = uart0_addr_base + uart0_addr_size;
+ 
+    function Bool fn_is_uart0_addr (Fabric_Addr addr);
+@@ -156,23 +156,23 @@ module mkSoC_Map (SoC_Map_IFC);
+    // ----------------------------------------------------------------
+    // Boot ROM
+ 
+-   Fabric_Addr boot_rom_addr_base = 'h_0000_1000;
+-   Fabric_Addr boot_rom_addr_size = 'h_0000_1000;    // 4K
++   Fabric_Addr boot_rom_addr_base = 'h_0000_0000;
++   Fabric_Addr boot_rom_addr_size = 'h_0001_0000;    // 64K
+    Fabric_Addr boot_rom_addr_lim  = boot_rom_addr_base + boot_rom_addr_size;
+ 
+    function Bool fn_is_boot_rom_addr (Fabric_Addr addr);
+-      return ((boot_rom_addr_base <= addr) && (addr < boot_rom_addr_lim));
++      return False;
+    endfunction
+ 
+    // ----------------------------------------------------------------
+    // Main Mem Controller 0
+ 
+    Fabric_Addr mem0_controller_addr_base = 'h_8000_0000;
+-   Fabric_Addr mem0_controller_addr_size = 'h_1000_0000;    // 256 MB
++   Fabric_Addr mem0_controller_addr_size = 'h_8000_0000;    // 2G
+    Fabric_Addr mem0_controller_addr_lim  = mem0_controller_addr_base + mem0_controller_addr_size;
+ 
+    function Bool fn_is_mem0_controller_addr (Fabric_Addr addr);
+-      return ((mem0_controller_addr_base <= addr) && (addr < mem0_controller_addr_lim));
++      return False;
+    endfunction
+ 
+    // ----------------------------------------------------------------
+@@ -194,7 +194,7 @@ module mkSoC_Map (SoC_Map_IFC);
+    Fabric_Addr tcm_addr_lim  = tcm_addr_base + tcm_addr_size;
+ 
+    function Bool fn_is_tcm_addr (Fabric_Addr addr);
+-      return ((tcm_addr_base <= addr) && (addr < tcm_addr_lim));
++      return False;
+    endfunction
+ 
+    // ----------------------------------------------------------------
+@@ -203,10 +203,7 @@ module mkSoC_Map (SoC_Map_IFC);
+    // (Caches need this information to cache these addresses.)
+ 
+    function Bool fn_is_mem_addr (Fabric_Addr addr);
+-      return (   fn_is_boot_rom_addr (addr)
+-	      || fn_is_mem0_controller_addr (addr)
+-	      || fn_is_tcm_addr (addr)
+-	      );
++      return False;
+    endfunction
+ 
+    // ----------------------------------------------------------------
+@@ -215,13 +212,7 @@ module mkSoC_Map (SoC_Map_IFC);
+    // (Caches need this information to avoid cacheing these addresses.)
+ 
+    function Bool fn_is_IO_addr (Fabric_Addr addr);
+-      return (   fn_is_near_mem_io_addr (addr)
+-	      || fn_is_plic_addr (addr)
+-	      || fn_is_uart0_addr  (addr)
+-`ifdef INCLUDE_ACCEL0
+-	      || fn_is_accel0_addr  (addr)
+-`endif
+-	      );
++      return True;
+    endfunction
+ 
+    // ----------------------------------------------------------------
+diff --git a/src_Testbench/SoC/SoC_Top.bsv b/src_Testbench/SoC/SoC_Top.bsv
+index 2778ab0..08fbf10 100644
+--- a/src_Testbench/SoC/SoC_Top.bsv
++++ b/src_Testbench/SoC/SoC_Top.bsv
+@@ -81,8 +81,12 @@ interface SoC_Top_IFC;
+ `endif
+ 
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifdef TANDEM_VERIF_DIRECT //Modified for DExIE
++   interface Get #(Trace_Data)  trace_data_out;
++`else
+    // To tandem verifier
+    interface Get #(Info_CPU_to_Verifier) tv_verifier_info_get;
++`endif
+ `endif
+ 
+    // External real memory
+@@ -377,6 +381,13 @@ module mkSoC_Top (SoC_Top_IFC);
+       $display ("    ", fshow (req));
+    endrule
+ `endif
++`ifdef INCLUDE_DEXIE_TAP
++   rule rl_dexie_stall;
++      core.dexie_stall(False);
++      core.dexie_stallOnStore(False);
++      core.dexie_continueStore(False);
++   endrule
++`endif
+ 
+    // ================================================================
+    // INTERFACE
+@@ -391,8 +402,12 @@ module mkSoC_Top (SoC_Top_IFC);
+ `endif
+ 
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifdef TANDEM_VERIF_DIRECT //Modified for DExIE
++   interface trace_data_out = core.trace_data_out;
++`else
+    // To tandem verifier
+    interface tv_verifier_info_get = core.tv_verifier_info_get;
++`endif
+ `endif
+ 
+    // External real memory
+diff --git a/src_Testbench/Top/Top_HW_Side.bsv b/src_Testbench/Top/Top_HW_Side.bsv
+index 8772aab..a040148 100644
+--- a/src_Testbench/Top/Top_HW_Side.bsv
++++ b/src_Testbench/Top/Top_HW_Side.bsv
+@@ -85,6 +85,7 @@ module mkTop_HW_Side (Empty) ;
+       // ----------------
+       // Open file for Tandem Verification trace output
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifndef TANDEM_VERIF_DIRECT //Modified for DExIE
+       let success <- c_trace_file_open ('h_AA);
+       if (success == 0) begin
+ 	 $display ("ERROR: Top_HW_Side.rl_step0: error opening trace file.");
+@@ -93,6 +94,9 @@ module mkTop_HW_Side (Empty) ;
+       end
+       else
+ 	 $display ("Top_HW_Side.rl_step0: opened trace file.");
++`else
++      $display ("Warning: tandem verification output logs not available for direct output");
++`endif
+ `endif
+ 
+       // ----------------
+@@ -125,6 +129,7 @@ module mkTop_HW_Side (Empty) ;
+    // Tandem verifier: drain and output vectors of bytes
+ 
+ `ifdef INCLUDE_TANDEM_VERIF
++`ifndef TANDEM_VERIF_DIRECT //Modified for DExIE
+    rule rl_tv_vb_out;
+       let tv_info <- soc_top.tv_verifier_info_get.get;
+       let n  = tv_info.num_bytes;
+@@ -150,6 +155,7 @@ module mkTop_HW_Side (Empty) ;
+ 	 $finish (1);
+       end
+    endrule
++`endif
+ `endif
+ 
+    // ================================================================

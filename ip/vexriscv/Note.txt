@@ -1,0 +1,6 @@
+Built using riscv/vexriscv/setup.sh from tapasco-riscv.
+Modify the setup.sh script as follows:
+Remove the git reset line. Checkout commit ddc59bc of VexRiscv and commit ecb5a80b of SpinalHDL.
+Apply vexriscv_tapasco_dexie.diff instead of vexriscv_tapasco.patch.
+
+Copy the files from IP/riscv/VexRiscv/* recursively to the DExIE IP folder ip/vexriscv.

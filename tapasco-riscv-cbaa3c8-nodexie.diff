@@ -1,0 +1,477 @@
+diff --git a/Makefile b/Makefile
+index 706883e..ec3896c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,7 +1,7 @@
+-BRAM_SIZE?=0x4000
++BRAM_SIZE?=0x10000
+ PYNQ=xc7z020clg400-1
+ XLEN?=32
+-CACHE?=false
++CACHE?=true
+ 
+ ifndef TAPASCO_HOME
+ $(error TAPASCO_HOME is not set, make sure to source setup.sh in TaPaSCo dir)
+diff --git a/riscv/flute32/flute_tapasco.patch b/riscv/flute32/flute_tapasco.patch
+index e173970..5398556 100644
+--- a/riscv/flute32/flute_tapasco.patch
++++ b/riscv/flute32/flute_tapasco.patch
+@@ -1,5 +1,5 @@
+ diff --git a/src_Testbench/SoC/SoC_Map.bsv b/src_Testbench/SoC/SoC_Map.bsv
+-index 4042041..f86d96d 100644
++index 4042041..c1613fd 100644
+ --- a/src_Testbench/SoC/SoC_Map.bsv
+ +++ b/src_Testbench/SoC/SoC_Map.bsv
+ @@ -110,8 +110,8 @@ module mkSoC_Map (SoC_Map_IFC);
+@@ -40,7 +40,7 @@ index 4042041..f86d96d 100644
+ -   Fabric_Addr boot_rom_addr_base = 'h_0000_1000;
+ -   Fabric_Addr boot_rom_addr_size = 'h_0000_1000;    // 4K
+ +   Fabric_Addr boot_rom_addr_base = 'h_0000_0000;
+-+   Fabric_Addr boot_rom_addr_size = 'h_0000_8000;    // 4K
+++   Fabric_Addr boot_rom_addr_size = 'h_0001_0000;    // 64K
+     Fabric_Addr boot_rom_addr_lim  = boot_rom_addr_base + boot_rom_addr_size;
+  
+     function Bool fn_is_boot_rom_addr (Fabric_Addr addr);
+diff --git a/riscv/flute32/setup.sh b/riscv/flute32/setup.sh
+index 8f9838c..5648dbb 100755
+--- a/riscv/flute32/setup.sh
++++ b/riscv/flute32/setup.sh
+@@ -3,6 +3,7 @@
+ mkdir -p IP/riscv/
+ cd riscv/flute32
+ git clone https://github.com/bluespec/Flute.git
++git checkout 3e2597e
+ cd Flute
+ git apply ../flute_tapasco.patch
+ cd ..
+diff --git a/riscv/orca/setup.sh b/riscv/orca/setup.sh
+index f3e2df1..1c6d161 100755
+--- a/riscv/orca/setup.sh
++++ b/riscv/orca/setup.sh
+@@ -4,6 +4,7 @@ if [ ! -d "Orca/orca" ]; then
+ 	mkdir Orca
+ 	cd Orca
+ 	git clone https://github.com/cahz/orca.git
++	git checkout f39b2d8
+ 	cd ..
+ fi
+ 
+diff --git a/riscv/piccolo32/piccolo_tapasco.patch b/riscv/piccolo32/piccolo_tapasco.patch
+index f3fb2df..c87ba15 100644
+--- a/riscv/piccolo32/piccolo_tapasco.patch
++++ b/riscv/piccolo32/piccolo_tapasco.patch
+@@ -1,5 +1,5 @@
+ diff --git a/src_Testbench/SoC/SoC_Map.bsv b/src_Testbench/SoC/SoC_Map.bsv
+-index 4042041..e4849a2 100644
++index 4042041..960c773 100644
+ --- a/src_Testbench/SoC/SoC_Map.bsv
+ +++ b/src_Testbench/SoC/SoC_Map.bsv
+ @@ -29,18 +29,15 @@ export  SoC_Map_IFC (..), mkSoC_Map;
+@@ -40,7 +40,7 @@ index 4042041..e4849a2 100644
+  
+ -   Fabric_Addr near_mem_io_addr_base = 'h_0200_0000;
+ -   Fabric_Addr near_mem_io_addr_size = 'h_0000_C000;    // 48K
+-+   Fabric_Addr near_mem_io_addr_base = 'h_0001_0000;
+++   Fabric_Addr near_mem_io_addr_base = 'h_0002_0000;
+ +   Fabric_Addr near_mem_io_addr_size = 'h_0000_0000;    // 0
+     Fabric_Addr near_mem_io_addr_lim  = near_mem_io_addr_base + near_mem_io_addr_size;
+  
+@@ -78,7 +78,7 @@ index 4042041..e4849a2 100644
+ -   Fabric_Addr boot_rom_addr_base = 'h_0000_1000;
+ -   Fabric_Addr boot_rom_addr_size = 'h_0000_1000;    // 4K
+ +   Fabric_Addr boot_rom_addr_base = 'h_0000_0000;
+-+   Fabric_Addr boot_rom_addr_size = 'h_0000_8000;    // 4K
+++   Fabric_Addr boot_rom_addr_size = 'h_0001_0000;    // 4K
+     Fabric_Addr boot_rom_addr_lim  = boot_rom_addr_base + boot_rom_addr_size;
+  
+     function Bool fn_is_boot_rom_addr (Fabric_Addr addr);
+diff --git a/riscv/piccolo32/setup.sh b/riscv/piccolo32/setup.sh
+index ff5a725..6e2e832 100755
+--- a/riscv/piccolo32/setup.sh
++++ b/riscv/piccolo32/setup.sh
+@@ -3,6 +3,7 @@
+ mkdir -p IP/riscv/
+ cd riscv/piccolo32
+ git clone https://github.com/bluespec/Piccolo.git
++git checkout 21ea60c
+ cd Piccolo
+ git apply ../piccolo_tapasco.patch
+ cd ..
+diff --git a/riscv/picorv32/setup.sh b/riscv/picorv32/setup.sh
+index acc742b..51fc579 100755
+--- a/riscv/picorv32/setup.sh
++++ b/riscv/picorv32/setup.sh
+@@ -8,6 +8,7 @@ else
+ 	cd riscv/picorv32/picorv32
+ 	git pull
+ fi
++git checkout e308982
+ cd ..
+ mkdir -p ../../IP/riscv/PicoRV32
+ cp picorv32/picorv32.v ../../IP/riscv/PicoRV32
+diff --git a/riscv/taiga/setup.sh b/riscv/taiga/setup.sh
+index 52c5986..264b823 100755
+--- a/riscv/taiga/setup.sh
++++ b/riscv/taiga/setup.sh
+@@ -4,6 +4,7 @@ mkdir -p IP/riscv/
+ cd riscv/taiga
+ git clone https://gitlab.com/sfu-rcl/Taiga.git
+ cd Taiga
++git checkout 986f718
+ git apply ../taiga_tapasco.patch
+ cd ..
+ vivado -nolog -nojournal -mode batch -source package.tcl
+diff --git a/riscv/taiga/taiga_tapasco.patch b/riscv/taiga/taiga_tapasco.patch
+index bd7a2cc..d74b765 100644
+--- a/riscv/taiga/taiga_tapasco.patch
++++ b/riscv/taiga/taiga_tapasco.patch
+@@ -1,5 +1,103 @@
++diff --git a/core/branch_predictor_ram.sv b/core/branch_predictor_ram.sv
++index 50da88e..b9451d8 100644
++--- a/core/branch_predictor_ram.sv
+++++ b/core/branch_predictor_ram.sv
++@@ -45,7 +45,7 @@ module branch_predictor_ram
++             branch_ram[i] = '0;
++     end
++ 
++-    always_ff @(posedge clk) begin
+++    always @(posedge clk) begin
++         if (write_en)
++             branch_ram[write_addr] <= write_data;
++     end
++diff --git a/core/decode.sv b/core/decode.sv
++index 58cd797..a12f9ee 100755
++--- a/core/decode.sv
+++++ b/core/decode.sv
++@@ -115,6 +115,8 @@ module decode(
++     logic store_conditional;
++     logic load_reserve;
++     logic [4:0] amo_type;
+++	
+++	logic is_csr;
++ 
++     genvar i;
++     ////////////////////////////////////////////////////
++@@ -303,7 +305,6 @@ module decode(
++     logic sfence;
++     logic ifence;
++     logic environment_op;
++-    logic is_csr;
++     assign sfence = fb.instruction[25];
++     assign ifence =  (opcode_trim == FENCE_T) && fn3[0];
++     assign environment_op = (opcode_trim == SYSTEM_T) && (fn3 == 0);
++diff --git a/core/load_store_unit.sv b/core/load_store_unit.sv
++index c76d425..b416f03 100755
++--- a/core/load_store_unit.sv
+++++ b/core/load_store_unit.sv
++@@ -342,7 +342,6 @@ module load_store_unit (
++ 
++     ////////////////////////////////////////////////////
++     //Output bank
++-    assign wb.rd = ls_done ? final_load_data : csr_rd;
++ 
++     logic exception_complete;
++     logic ls_done;
++@@ -351,6 +350,7 @@ module load_store_unit (
++     end
++     assign ls_done = load_complete | exception_complete;
++ 
+++    assign wb.rd = ls_done ? final_load_data : csr_rd;
++     assign wb.done = csr_done | ls_done;
++     assign wb.id = csr_done ? csr_id : stage2_attr.instruction_id;
++     ////////////////////////////////////////////////////
++diff --git a/core/ras.sv b/core/ras.sv
++index 813e142..c44195f 100755
++--- a/core/ras.sv
+++++ b/core/ras.sv
++@@ -47,7 +47,7 @@ module ras (
++     assign ras.addr = lut_ram[read_index];
++     assign ras.valid = valid_chain[read_index];
++     
++-    always_ff @ (posedge clk) begin
+++    always @ (posedge clk) begin
++         if (ras.push)
++             lut_ram[write_index] <= ras.new_addr;
++     end
++@@ -65,7 +65,7 @@ module ras (
++     assign write_index = (ras.push & ~ras.pop) ? (read_index + RAS_DEPTH_W'(valid_chain[read_index])) : read_index;
++     
++     assign valid_chain_update = ras.push | ras.pop;
++-    always_ff @ (posedge clk) begin
+++    always @ (posedge clk) begin
++         if (valid_chain_update)
++             valid_chain[write_index] <= ras.push;
++     end    
++diff --git a/core/register_file.sv b/core/register_file.sv
++index e239523..564dd13 100755
++--- a/core/register_file.sv
+++++ b/core/register_file.sv
++@@ -59,7 +59,7 @@ module register_file(
++     end
++ 
++     //Writeback unit does not assert rf_wb.commit when the target register is r0
++-    always_ff @ (posedge clk) begin
+++    always @ (posedge clk) begin
++         if (~gc_supress_writeback & valid_write)
++             register[rf_wb.rd_addr] <= rf_wb.rd_data;
++     end
++@@ -74,7 +74,7 @@ module register_file(
++             .rs2_inuse(rs2_inuse)
++             );
++ 
++-    always_ff @ (posedge clk) begin
+++    always @ (posedge clk) begin
++         if (rf_decode.instruction_issued)
++             in_use_by[rf_decode.future_rd_addr] <= rf_decode.id;
++     end
+ diff --git a/core/taiga_config.sv b/core/taiga_config.sv
+-index 771b364..a95fbe6 100755
++index 4f548a4..a407224 100755
+ --- a/core/taiga_config.sv
+ +++ b/core/taiga_config.sv
+ @@ -36,7 +36,7 @@ package taiga_config;
+@@ -11,15 +109,16 @@ index 771b364..a95fbe6 100755
+  
+      //CSR counter width (33-64 bits): 48-bits --> 32 days @ 100MHz
+      parameter COUNTER_W = 33;
+-@@ -93,16 +93,16 @@ package taiga_config;
++@@ -95,17 +95,17 @@ package taiga_config;
+  
+      ////////////////////////////////////////////////////
+      //Address space
+ -    parameter SCRATCH_ADDR_L = 32'h80000000;
+ -    parameter SCRATCH_ADDR_H = 32'h800FFFFF;
+-+    parameter SCRATCH_ADDR_L = 32'h00000000;
+-+    parameter SCRATCH_ADDR_H = 32'h0000FFFF;
+-     parameter SCRATCH_BIT_CHECK = 4;
++-    parameter SCRATCH_BIT_CHECK = 4;
+++    parameter SCRATCH_ADDR_L = 32'h00010000;
+++    parameter SCRATCH_ADDR_H = 32'h0001FFFF;
+++    parameter SCRATCH_BIT_CHECK = 16;
+  
+ -    parameter MEMORY_ADDR_L = 32'h40000000;
+ -    parameter MEMORY_ADDR_H = 32'h4FFFFFFF;
+@@ -30,14 +129,16 @@ index 771b364..a95fbe6 100755
+  
+ -    parameter BUS_ADDR_L = 32'h60000000;
+ -    parameter BUS_ADDR_H = 32'h6FFFFFFF;
++-    parameter BUS_BIT_CHECK = 4;
+ +    parameter BUS_ADDR_L = 32'h11000000;
+-+    parameter BUS_ADDR_H = 32'h11FFFFFF;
+-     parameter BUS_BIT_CHECK = 4;
+++    parameter BUS_ADDR_H = 32'h11003FFF;
+++    parameter BUS_BIT_CHECK = 18;
+  
+  
++     ////////////////////////////////////////////////////
+ diff --git a/core/taiga_wrapper.sv b/core/taiga_wrapper.sv
+ new file mode 100644
+-index 0000000..eef9c9e
++index 0000000..5081bef
+ --- /dev/null
+ +++ b/core/taiga_wrapper.sv
+ @@ -0,0 +1,228 @@
+@@ -230,7 +331,7 @@ index 0000000..eef9c9e
+ +wishbone_interface m_wishbone();
+ +
+ +l2_requester_interface l2[L2_NUM_PORTS-1:0]();
+-+assign l2[1].request = 0;
+++//assign l2[1].request = 0;
+ +assign l2[1].request_push = 0;
+ +assign l2[1].wr_data_push = 0;
+ +assign l2[1].inv_ack = l2[1].inv_valid;
+@@ -542,3 +643,16 @@ index 0000000..872e62c
+ +);
+ +
+ +endmodule
++diff --git a/core/write_back.sv b/core/write_back.sv
++index e59fda2..bc04201 100755
++--- a/core/write_back.sv
+++++ b/core/write_back.sv
++@@ -174,7 +174,7 @@ module write_back(
++     end
++     //Inflight Instruction ID table
++     //Stores rd_addr and whether instruction is a store
++-    always_ff @ (posedge clk) begin
+++    always @ (posedge clk) begin
++         if (ti.id_available)
++             id_metadata[ti.issue_id] <= ti.inflight_packet;
++     end
+diff --git a/riscv/vexriscv/setup.sh b/riscv/vexriscv/setup.sh
+index 385d891..ab278b4 100755
+--- a/riscv/vexriscv/setup.sh
++++ b/riscv/vexriscv/setup.sh
+@@ -5,14 +5,16 @@ if [ ! -d "riscv/vexriscv/VexRiscv" ]; then
+ 	git clone https://github.com/SpinalHDL/VexRiscv.git
+ 	git clone https://github.com/SpinalHDL/SpinalHDL.git -b master
+ 	cd SpinalHDL
++	git checkout ecb5a80b
+ 	sbt clean compile publishLocal
+ 	cd ../VexRiscv
+ else
+ 	cd riscv/vexriscv/VexRiscv
+-	git pull
++	#git pull
+ fi
+ 
+-git reset HEAD --hard
++git checkout ddc59bc
++#git reset HEAD --hard
+ git apply ../vexriscv_tapasco.patch
+ sbt "runMain vexriscv.demo.VexRiscvAxi4WithIntegratedJtag"
+ 
+diff --git a/riscv/vexriscv/vexriscv_tapasco.patch b/riscv/vexriscv/vexriscv_tapasco.patch
+index ee7e394..21501f3 100644
+--- a/riscv/vexriscv/vexriscv_tapasco.patch
++++ b/riscv/vexriscv/vexriscv_tapasco.patch
+@@ -1,8 +1,8 @@
+ diff --git a/src/main/scala/vexriscv/demo/VexRiscvAxi4WithIntegratedJtag.scala b/src/main/scala/vexriscv/demo/VexRiscvAxi4WithIntegratedJtag.scala
+-index b002c06..bd9826e 100644
++index b002c06..e9cc54d 100644
+ --- a/src/main/scala/vexriscv/demo/VexRiscvAxi4WithIntegratedJtag.scala
+ +++ b/src/main/scala/vexriscv/demo/VexRiscvAxi4WithIntegratedJtag.scala
+-@@ -25,57 +25,23 @@ object VexRiscvAxi4WithIntegratedJtag{
++@@ -25,57 +25,32 @@ object VexRiscvAxi4WithIntegratedJtag{
+        //CPU configuration
+        val cpuConfig = VexRiscvConfig(
+          plugins = List(
+@@ -15,32 +15,30 @@ index b002c06..bd9826e 100644
+ -//            catchAddressMisaligned = false,
+ -//            catchAccessFault = false
+ -//          ),
+--          new IBusCachedPlugin(
++           new IBusCachedPlugin(
+ -            prediction = STATIC,
+--            config = InstructionCacheConfig(
+++            resetVector = 0,
+++            prediction = DYNAMIC_TARGET,
++             config = InstructionCacheConfig(
+ -              cacheSize = 4096,
+--              bytePerLine =32,
+--              wayCount = 1,
+--              addressWidth = 32,
+--              cpuDataWidth = 32,
+--              memDataWidth = 32,
+++              cacheSize = 1024,
++               bytePerLine =32,
++               wayCount = 1,
++               addressWidth = 32,
++               cpuDataWidth = 32,
++               memDataWidth = 32,
+ -              catchIllegalAccess = true,
+ -              catchAccessFault = true,
+--              asyncTagMemory = false,
+--              twoCycleRam = true,
+--              twoCycleCache = true
+--            )
+++              catchIllegalAccess = false,
+++              catchAccessFault = false,
++               asyncTagMemory = false,
++               twoCycleRam = true,
++               twoCycleCache = true
++             )
+ -            //            askMemoryTranslation = true,
+ -            //            memoryTranslatorPortConfig = MemoryTranslatorPortConfig(
+ -            //              portTlbSize = 4
+ -            //            )
+-+          new IBusSimplePlugin(
+-+            resetVector = 0,
+-+            cmdForkOnSecondStage = false,
+-+            cmdForkPersistence = true,
+-+            prediction = NONE,
+-+            catchAccessFault = false,
+-+            compressedGen = false
+            ),
+ -          new DBusCachedPlugin(
+ -            config = new DataCacheConfig(
+@@ -72,7 +70,7 @@ index b002c06..bd9826e 100644
+            ),
+            new RegFilePlugin(
+              regFileReadyKind = plugin.SYNC,
+-@@ -86,7 +52,8 @@ object VexRiscvAxi4WithIntegratedJtag{
++@@ -86,7 +61,8 @@ object VexRiscvAxi4WithIntegratedJtag{
+              separatedAddSub = false,
+              executeInsertion = true
+            ),
+@@ -82,7 +80,7 @@ index b002c06..bd9826e 100644
+            new MulPlugin,
+            new DivPlugin,
+            new HazardSimplePlugin(
+-@@ -98,7 +65,6 @@ object VexRiscvAxi4WithIntegratedJtag{
++@@ -98,7 +74,6 @@ object VexRiscvAxi4WithIntegratedJtag{
+              pessimisticWriteRegFile = false,
+              pessimisticAddressMatch = false
+            ),
+diff --git a/specific_tcl/orca_pe_project.tcl b/specific_tcl/orca_pe_project.tcl
+index d9ae7f0..4987158 100644
+--- a/specific_tcl/orca_pe_project.tcl
++++ b/specific_tcl/orca_pe_project.tcl
+@@ -10,21 +10,29 @@
+   connect_bd_net [get_bd_pins orca_timer_0/reset] [get_bd_pins RVController_0/rv_reset]
+   connect_bd_net [get_bd_ports CLK] [get_bd_pins orca_timer_0/clk]
+ 
+-  # Prepare instruction memory controller
+-  set_property CONFIG.AXI_PROTOCOL {AXI4LITE} [get_bd_cells rv_imem_ctrl]
+-
+   # Create port connections
+   connect_bd_net -net RVController_0_rv_reset [get_bd_pins RVController_0/rv_reset] [get_bd_pins orca_0/reset]
+ 
+   # Create address segments
+   if { $cache } {
++    #CONFIG.ENABLE_EXCEPTIONS {0} \
++    #CONFIG.PIPELINE_STAGES {5} \
++    #CONFIG.ICACHE_SIZE {32768} \
++    #CONFIG.DCACHE_SIZE {32768} \
++    #CONFIG.DCACHE_WRITEBACK {0} \
++    #CONFIG.UC_MEMORY_REGIONS {0} 
+     set_property -dict [ list \
+-      CONFIG.ENABLE_EXCEPTIONS {0} \
+-      CONFIG.PIPELINE_STAGES {5} \
+-      CONFIG.ICACHE_SIZE {32768} \
+-      CONFIG.DCACHE_SIZE {32768} \
++      CONFIG.AUX_MEMORY_REGIONS {0} \
++      CONFIG.BTB_ENTRIES {8} \
++      CONFIG.INSTRUCTION_REQUEST_REGISTER {1} \
++      CONFIG.MAX_IFETCHES_IN_FLIGHT {4} \
++      CONFIG.ICACHE_SIZE {1024} \
++      CONFIG.DCACHE_SIZE {1024} \
+       CONFIG.DCACHE_WRITEBACK {0} \
+       CONFIG.UC_MEMORY_REGIONS {0} \
++      CONFIG.DC_REQUEST_REGISTER {FULL} \
++      CONFIG.MULTIPLY_ENABLE {1} \
++      CONFIG.DIVIDE_ENABLE {1} \
+     ] $orca_0
+     set iaxi [get_bd_intf_pins orca_0/IC]
+     connect_bd_intf_net [get_bd_intf_pins orca_0/DC] -boundary_type upper [get_bd_intf_pins axi_mem_intercon_1/S00_AXI]
+@@ -33,6 +41,8 @@
+     create_bd_addr_seg -range $lmem -offset $lmem [get_bd_addr_spaces orca_0/DC] [get_bd_addr_segs rv_dmem_ctrl/S_AXI/Mem0] SEG_rv_dmem_ctrl_Mem0
+     create_bd_addr_seg -range $lmem -offset 0x00000000 [get_bd_addr_spaces orca_0/IC] [get_bd_addr_segs rv_imem_ctrl/S_AXI/Mem0] SEG_rv_imem_ctrl_Mem0
+   } else {
++    # Prepare instruction memory controller
++    set_property CONFIG.AXI_PROTOCOL {AXI4LITE} [get_bd_cells rv_imem_ctrl]
+     set_property -dict [ list \
+       CONFIG.ENABLE_EXCEPTIONS {0} \
+       CONFIG.PIPELINE_STAGES {5} \
+diff --git a/specific_tcl/picorv32_pe_project.tcl b/specific_tcl/picorv32_pe_project.tcl
+index ec19019..789c074 100644
+--- a/specific_tcl/picorv32_pe_project.tcl
++++ b/specific_tcl/picorv32_pe_project.tcl
+@@ -1,14 +1,10 @@
+   # Create instance: VexRiscvAxi4_0, and set properties
+   set picorv32_0 [ create_bd_cell -type ip -vlnv [dict get $cpu_vlnv $project_name] picorv32_0 ]
+   set cpu_clk [get_bd_pins picorv32_0/clk]
+-  set_property -dict [list CONFIG.BARREL_SHIFTER {1} CONFIG.ENABLE_FAST_MUL {1} CONFIG.ENABLE_DIV {1} CONFIG.PROGADDR_IRQ {0x00100000} CONFIG.STACKADDR [expr {$lmem * 2}]] [get_bd_cells picorv32_0]
+-
+-  set_property -dict [ list \
+-   CONFIG.SUPPORTS_NARROW_BURST {0} \
+-   CONFIG.NUM_READ_OUTSTANDING {1} \
+-   CONFIG.NUM_WRITE_OUTSTANDING {1} \
+-   CONFIG.MAX_BURST_LENGTH {1} \
+- ] [get_bd_intf_pins /picorv32_0/mem_axi]
++  set_property -dict [list \
++   CONFIG.ENABLE_MUL {1} \
++   CONFIG.ENABLE_DIV {1} \
++  ] [get_bd_cells picorv32_0]
+ 
+   # PicoRV32 only has one AXI master port, attach both memories to axi_mem_intercon_1
+   connect_bd_intf_net [get_bd_intf_pins picorv32_0/mem_axi] [get_bd_intf_pins axi_mem_intercon_1/S00_AXI]

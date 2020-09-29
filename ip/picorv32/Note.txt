@@ -1,0 +1,2 @@
+The file picorv32.v is the single source of this core, modified based on commit e308982 of the PicoRV32 repository.
+See the riscv/picorv32/setup.sh script from the tapasco-riscv repository.

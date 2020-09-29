@@ -1,0 +1,3 @@
+The diff file in this folder is for commit 986f718 of the Taiga repository (see riscv/taiga/setup.sh in the tapasco-riscv repository).
+This folder already contains all raw source files.
+Changes to the output/input signals can either be applied to component.xml manually or by rebuilding the IP through the setup script mentioned above.

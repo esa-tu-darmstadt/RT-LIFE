@@ -1,0 +1,584 @@
+diff --git a/src/main/scala/vexriscv/demo/VexRiscvAxi4WithIntegratedJtag.scala b/src/main/scala/vexriscv/demo/VexRiscvAxi4WithIntegratedJtag.scala
+index b002c06..e53e3a8 100644
+--- a/src/main/scala/vexriscv/demo/VexRiscvAxi4WithIntegratedJtag.scala
++++ b/src/main/scala/vexriscv/demo/VexRiscvAxi4WithIntegratedJtag.scala
+@@ -25,57 +25,42 @@ object VexRiscvAxi4WithIntegratedJtag{
+       //CPU configuration
+       val cpuConfig = VexRiscvConfig(
+         plugins = List(
+-          new PcManagerSimplePlugin(0x00000000l, false),
+-//          new IBusSimplePlugin(
+-//            interfaceKeepData = false,
+-//            catchAccessFault = false
+-//          ),
+-//          new DBusSimplePlugin(
+-//            catchAddressMisaligned = false,
+-//            catchAccessFault = false
+-//          ),
+           new IBusCachedPlugin(
+-            prediction = STATIC,
++            resetVector = 0,
++            prediction = DYNAMIC_TARGET,
+             config = InstructionCacheConfig(
+-              cacheSize = 4096,
++              cacheSize = 1024,
+               bytePerLine =32,
+               wayCount = 1,
+               addressWidth = 32,
+               cpuDataWidth = 32,
+               memDataWidth = 32,
+-              catchIllegalAccess = true,
+-              catchAccessFault = true,
++              catchIllegalAccess = false,
++              catchAccessFault = false,
+               asyncTagMemory = false,
+               twoCycleRam = true,
+               twoCycleCache = true
+             )
+-            //            askMemoryTranslation = true,
+-            //            memoryTranslatorPortConfig = MemoryTranslatorPortConfig(
+-            //              portTlbSize = 4
+-            //            )
+           ),
+-          new DBusCachedPlugin(
+-            config = new DataCacheConfig(
+-              cacheSize         = 4096,
+-              bytePerLine       = 32,
+-              wayCount          = 1,
+-              addressWidth      = 32,
+-              cpuDataWidth      = 32,
+-              memDataWidth      = 32,
+-              catchAccessError  = true,
+-              catchIllegal      = true,
+-              catchUnaligned    = true
+-            ),
+-            memoryTranslatorPortConfig = null
+-            //            memoryTranslatorPortConfig = MemoryTranslatorPortConfig(
+-            //              portTlbSize = 6
+-            //            )
++          //new IBusSimplePlugin(
++          //  resetVector = 0,
++          //  cmdForkOnSecondStage = false,
++          //  cmdForkPersistence = true,
++          //  prediction = NONE,
++          //  catchAccessFault = false,
++          //  compressedGen = false
++          //),
++          new DBusSimplePlugin(
++            catchAddressMisaligned = false,
++            catchAccessFault = false
+           ),
++          //Plugin that enables DExIE stall signals (stall, stall on store, continue store).
++          new DexieStallPlugin(),
+           new StaticMemoryTranslatorPlugin(
+-            ioRange      = _(31 downto 28) === 0xF
++            ioRange      = _(31 downto 30) === 0x0
+           ),
+           new DecoderSimplePlugin(
+-            catchIllegalInstruction = true
++            catchIllegalInstruction = false
+           ),
+           new RegFilePlugin(
+             regFileReadyKind = plugin.SYNC,
+@@ -86,7 +71,8 @@ object VexRiscvAxi4WithIntegratedJtag{
+             separatedAddSub = false,
+             executeInsertion = true
+           ),
+-          new FullBarrelShifterPlugin,
++          new LightShifterPlugin,
++//          new FullBarrelShifterPlugin,
+           new MulPlugin,
+           new DivPlugin,
+           new HazardSimplePlugin(
+@@ -98,7 +84,6 @@ object VexRiscvAxi4WithIntegratedJtag{
+             pessimisticWriteRegFile = false,
+             pessimisticAddressMatch = false
+           ),
+-          new DebugPlugin(ClockDomain.current.clone(reset = Bool().setName("debugReset"))),
+           new BranchPlugin(
+             earlyBranch = false,
+             catchAddressMisaligned = true
+@@ -137,6 +122,22 @@ object VexRiscvAxi4WithIntegratedJtag{
+       cpu.rework {
+         var iBus : Axi4ReadOnly = null
+         for (plugin <- cpuConfig.plugins) plugin match {
++          case plugin: BranchPlugin => {
++            //Export the DExIE control flow outputs.
++            plugin.dexieInterface.setAsDirectionLess()
++            master(plugin.dexieInterface).setName("dexie_cf").addTag(ClockDomainTag(ClockDomain.current))
++          }
++          case plugin: RegFilePlugin => {
++            //Export the DExIE data flow register outputs.
++            plugin.dexieInterface.setAsDirectionLess()
++            master(plugin.dexieInterface).setName("dexie_df_reg").addTag(ClockDomainTag(ClockDomain.current))
++          }
++          case plugin: DexieStallPlugin => {
++            plugin.stall.addTag(ClockDomainTag(ClockDomain.current))
++            plugin.stall_on_store.addTag(ClockDomainTag(ClockDomain.current))
++            plugin.continue_store.addTag(ClockDomainTag(ClockDomain.current))
++            plugin.dexie_is_stalling_mem.addTag(ClockDomainTag(ClockDomain.current))
++          }
+           case plugin: IBusSimplePlugin => {
+             plugin.iBus.setAsDirectionLess() //Unset IO properties of iBus
+             iBus = master(plugin.iBus.toAxi4ReadOnly().toFullConfig())
+@@ -150,6 +151,9 @@ object VexRiscvAxi4WithIntegratedJtag{
+               .addTag(ClockDomainTag(ClockDomain.current)) //Specify a clock domain to the iBus (used by QSysify)
+           }
+           case plugin: DBusSimplePlugin => {
++            plugin.dexieInterface.setAsDirectionLess()
++            master(plugin.dexieInterface).setName("dexie_df_mem").addTag(ClockDomainTag(ClockDomain.current))
++
+             plugin.dBus.setAsDirectionLess()
+             master(plugin.dBus.toAxi4Shared().toAxi4().toFullConfig())
+               .setName("dBusAxi")
+diff --git a/src/main/scala/vexriscv/plugin/BranchPlugin.scala b/src/main/scala/vexriscv/plugin/BranchPlugin.scala
+index e90a1fc..e6120ba 100644
+--- a/src/main/scala/vexriscv/plugin/BranchPlugin.scala
++++ b/src/main/scala/vexriscv/plugin/BranchPlugin.scala
+@@ -48,6 +48,15 @@ trait PredictionInterface{
+   def askDecodePrediction() : DecodePredictionBus
+ }
+ 
++//DExIE Control Flow information (PC, Instruction, Next PC) from the Execute stage.
++case class BranchDexieIntf() extends Bundle with IMasterSlave{
++  val valid = Bool //Set if the control flow signals are valid.
++  val curPc = UInt(32 bits) //The current PC.
++  val curInstr = UInt(32 bits) //The current instruction.
++  val nextPc = UInt(32 bits) //The next PC.
++
++  override def asMaster(): Unit = out(this)
++}
+ 
+ 
+ class BranchPlugin(earlyBranch : Boolean,
+@@ -69,7 +78,9 @@ class BranchPlugin(earlyBranch : Boolean,
+   var predictionJumpInterface : Flow[UInt] = null
+   var predictionExceptionPort : Flow[ExceptionCause] = null
+   var branchExceptionPort : Flow[ExceptionCause] = null
+-
++  
++  //Global DExIE interface field.
++  var dexieInterface : BranchDexieIntf = null
+ 
+   var decodePrediction : DecodePredictionBus = null
+   var fetchPrediction : FetchPredictionBus = null
+@@ -91,8 +102,11 @@ class BranchPlugin(earlyBranch : Boolean,
+     import Riscv._
+     import pipeline.config._
+     import IntAluPlugin._
+-
++    
+     assert(earlyBranch || withMemoryStage, "earlyBranch must be true when memory stage is disabled!")
++    
++    //Construct the DExIE interface.
++    dexieInterface = BranchDexieIntf()
+ 
+     val bActions = List[(Stageable[_ <: BaseType],Any)](
+       SRC1_CTRL         -> Src1CtrlEnum.RS,
+@@ -175,7 +189,7 @@ class BranchPlugin(earlyBranch : Boolean,
+ 
+       val less = input(SRC_LESS)
+       val eq = input(SRC1) === input(SRC2)
+-
++      
+       insert(BRANCH_DO) := input(BRANCH_CTRL).mux(
+         BranchCtrlEnum.INC  -> False,
+         BranchCtrlEnum.JAL  -> True,
+@@ -187,17 +201,42 @@ class BranchPlugin(earlyBranch : Boolean,
+           default -> less
+         )
+       )
+-
++      
+       val imm = IMM(input(INSTRUCTION))
+       val branch_src1 = (input(BRANCH_CTRL) === BranchCtrlEnum.JALR) ? input(RS1).asUInt | input(PC)
+-      val branch_src2 = input(BRANCH_CTRL).mux(
+-        BranchCtrlEnum.JAL  -> imm.j_sext,
+-        BranchCtrlEnum.JALR -> imm.i_sext,
+-        default             -> imm.b_sext
+-      ).asUInt
++	  //branch_src2 logic was extended to be correct for the case where no branch is taken (<=> no correction necessary),
++	  // since the result is required for the DExIE interface.
++      val instr_nextoffs = UInt(32 bits)
++      instr_nextoffs := (if(pipeline(RVC_GEN)) Mux(input(IS_RVC), B(2), B(4)) else B(4)).asUInt.resized
++      val branch_src2 = UInt(32 bits)
++      switch(input(BRANCH_CTRL)){
++        is(BranchCtrlEnum.JAL){
++          branch_src2 := imm.j_sext.asUInt
++        }
++        is(BranchCtrlEnum.JALR){
++          branch_src2 := imm.i_sext.asUInt
++        }
++        is(BranchCtrlEnum.INC){
++          branch_src2 := instr_nextoffs
++        }
++        is(BranchCtrlEnum.B){
++          branch_src2 := imm.b_sext.asUInt //For taken branches, use the immediate of the instruction.
++          when (!input(BRANCH_DO)) {
++            branch_src2 := instr_nextoffs  //For untaken branches, use the instruction size.
++          }
++        }
++      }
+ 
+       val branchAdder = branch_src1 + branch_src2
+       insert(BRANCH_CALC) := branchAdder(31 downto 1) @@ U"0"
++      
++	  //The DExIE signals are valid if the execute stage is ready and does not need to wait for hazards.
++	  //-> This condition is the same as jumpInterface.valid below except that it also accepts !input(BRANCH_DO).
++      dexieInterface.valid := arbitration.isFiring && !hasHazardOnBranch
++	  //Assign the DExIE signals using the PC and Instruction of this stage and the just calculated next PC.
++      dexieInterface.curPc := input(PC)
++      dexieInterface.curInstr := input(INSTRUCTION).asUInt
++      dexieInterface.nextPc := input(BRANCH_CALC)
+     }
+ 
+     //Apply branchs (JAL,JALR, Bxx)
+@@ -236,7 +275,7 @@ class BranchPlugin(earlyBranch : Boolean,
+ 
+       val less = input(SRC_LESS)
+       val eq = input(SRC1) === input(SRC2)
+-
++      
+       insert(BRANCH_COND_RESULT) := input(BRANCH_CTRL).mux(
+         BranchCtrlEnum.INC  -> False,
+         BranchCtrlEnum.JAL  -> True,
+@@ -268,13 +307,23 @@ class BranchPlugin(earlyBranch : Boolean,
+         default{
+           branch_src1 := input(PC)
+           branch_src2 := ((input(BRANCH_CTRL) === BranchCtrlEnum.JAL) ? imm.j_sext | imm.b_sext).asUInt
+-          when(input(PREDICTION_HAD_BRANCHED)){ //Assume the predictor never predict missaligned stuff, this avoid the need to know if the instruction should branch or not
++		  //This condition was extended for the DExIE next PC signal in case there is no branch or the branch is untaken.
++		  //Originally, only PREDICTION_HAD_BRANCHED was checked.
++          when((input(BRANCH_CTRL) === BranchCtrlEnum.INC) || (input(BRANCH_CTRL) === BranchCtrlEnum.B && !input(BRANCH_COND_RESULT)) || input(PREDICTION_HAD_BRANCHED)){ //Assume the predictor never predict missaligned stuff, this avoid the need to know if the instruction should branch or not
+             branch_src2 := (if(pipeline(RVC_GEN)) Mux(input(IS_RVC), B(2), B(4)) else B(4)).asUInt.resized
+           }
+         }
+       }
+       val branchAdder = branch_src1 + branch_src2
+       insert(BRANCH_CALC) := branchAdder(31 downto 1) @@ U"0"
++      
++	  //The DExIE signals are valid if the execute stage is ready and does not need to wait for hazards.
++	  //-> This condition is the same as jumpInterface.valid below except that it also accepts !input(BRANCH_DO).
++      dexieInterface.valid := arbitration.isFiring && !hasHazardOnBranch
++      dexieInterface.curPc := input(PC)
++      dexieInterface.curInstr := input(INSTRUCTION).asUInt
++	  //Assign the DExIE signals using the PC and Instruction of this stage and the just calculated next PC.
++      dexieInterface.nextPc := input(BRANCH_CALC)
+     }
+ 
+ 
+@@ -285,7 +334,7 @@ class BranchPlugin(earlyBranch : Boolean,
+       jumpInterface.valid := arbitration.isValid && input(BRANCH_DO) && !hasHazardOnBranch
+       jumpInterface.payload := input(BRANCH_CALC)
+       arbitration.flushNext setWhen(jumpInterface.valid)
+-
++      
+       if(catchAddressMisalignedForReal) {
+         val unalignedJump = input(BRANCH_DO) && input(BRANCH_CALC)(1)
+         branchExceptionPort.valid := arbitration.isValid && unalignedJump
+@@ -318,7 +367,7 @@ class BranchPlugin(earlyBranch : Boolean,
+ 
+       val less = input(SRC_LESS)
+       val eq = input(SRC1) === input(SRC2)
+-
++      
+       insert(BRANCH_DO) := input(BRANCH_CTRL).mux(
+         BranchCtrlEnum.INC  -> False,
+         BranchCtrlEnum.JAL  -> True,
+@@ -333,17 +382,40 @@ class BranchPlugin(earlyBranch : Boolean,
+ 
+       val branch_src1 = (input(BRANCH_CTRL) === BranchCtrlEnum.JALR) ? input(RS1).asUInt | input(PC)
+ 
++      val instr_nextoffs = UInt(32 bits)
++      instr_nextoffs := (if(pipeline(RVC_GEN)) Mux(input(IS_RVC), B(2), B(4)) else B(4)).asUInt.resized
+       val imm = IMM(branchSrc2Stage.input(INSTRUCTION))
+-      branchSrc2Stage.insert(BRANCH_SRC2) := branchSrc2Stage.input(BRANCH_CTRL).mux(
+-        BranchCtrlEnum.JAL  -> imm.j_sext,
+-        BranchCtrlEnum.JALR -> imm.i_sext,
+-        default             -> imm.b_sext
+-      ).asUInt
++      switch(input(BRANCH_CTRL)){
++        is(BranchCtrlEnum.JAL){
++          branchSrc2Stage.insert(BRANCH_SRC2) := imm.j_sext.asUInt
++        }
++        is(BranchCtrlEnum.JALR){
++          branchSrc2Stage.insert(BRANCH_SRC2) := imm.i_sext.asUInt
++        }
++        is(BranchCtrlEnum.INC){
++          branchSrc2Stage.insert(BRANCH_SRC2) := instr_nextoffs
++        }
++        is(BranchCtrlEnum.B){
++          branchSrc2Stage.insert(BRANCH_SRC2) := imm.b_sext.asUInt
++          when (!input(BRANCH_DO)) {
++                branchSrc2Stage.insert(BRANCH_SRC2) := instr_nextoffs
++          }
++        }
++      }
+ 
+       val branchAdder = branch_src1 + input(BRANCH_SRC2)
+       insert(BRANCH_CALC) := branchAdder(31 downto 1) @@ U"0"
+       insert(NEXT_PC) := input(PC) + (if(pipeline(RVC_GEN)) ((input(IS_RVC)) ? U(2) | U(4)) else 4)
+       insert(TARGET_MISSMATCH) := decode.input(PC) =/= input(BRANCH_CALC)
++      
++	  //The DExIE signals are valid if the execute stage is ready and does not need to wait for hazards.
++	  //-> This condition is the same as jumpInterface.valid below except that it also accepts !predictionMissmatch.
++      dexieInterface.valid := arbitration.isFiring && !hasHazardOnBranch
++      dexieInterface.curPc := input(PC)
++      dexieInterface.curInstr := input(INSTRUCTION).asUInt
++	  //Assign the DExIE signals using the PC and Instruction of this stage and the just calculated next PC.
++	  //-> If no branch is taken, select the PC value following the current instruction.
++      dexieInterface.nextPc := input(BRANCH_DO) ? input(BRANCH_CALC) | input(NEXT_PC)
+     }
+ 
+     //Apply branchs (JAL,JALR, Bxx)
+@@ -365,7 +437,6 @@ class BranchPlugin(earlyBranch : Boolean,
+       jumpInterface.payload := (input(BRANCH_DO) ? input(BRANCH_CALC) | input(NEXT_PC))
+       arbitration.flushNext setWhen(jumpInterface.valid)
+ 
+-
+       if(catchAddressMisalignedForReal) {
+         branchExceptionPort.valid := arbitration.isValid && input(BRANCH_DO) && input(BRANCH_CALC)(1)
+         branchExceptionPort.code := 0
+diff --git a/src/main/scala/vexriscv/plugin/CsrPlugin.scala b/src/main/scala/vexriscv/plugin/CsrPlugin.scala
+index 0cdc896..ec0880b 100644
+--- a/src/main/scala/vexriscv/plugin/CsrPlugin.scala
++++ b/src/main/scala/vexriscv/plugin/CsrPlugin.scala
+@@ -489,6 +489,9 @@ class CsrPlugin(val config: CsrPluginConfig) extends Plugin[VexRiscv] with Excep
+     import pipeline.config._
+     val fetcher = service(classOf[IBusFetcher])
+     val trapCodeWidth = log2Up((List(16) ++ interruptSpecs.map(_.id + 1) ++ exceptionPortsInfos.map(p => 1 << widthOf(p.port.code))).max)
++    
++	//FORMAL_HALT signal for CsrPlugin, required for RVFI through the FormalPlugin.
++    stages.head.insert(FORMAL_HALT) := False
+ 
+     //Define CSR mapping utilities
+     implicit class CsrAccessPimper(csrAccess : CsrAccess){
+@@ -813,6 +816,7 @@ class CsrPlugin(val config: CsrPluginConfig) extends Plugin[VexRiscv] with Excep
+         val pcValids = Vec(RegInit(False), stagesFromExecute.length)
+         val active = interrupt.valid && allowInterrupts && decode.arbitration.isValid
+         when(active){
++          decode.output(FORMAL_HALT) := True
+           decode.arbitration.haltByOther := True
+           for((stage, reg, previous) <- (stagesFromExecute, pcValids, True :: pcValids.toList).zipped){
+             when(!stage.arbitration.isStuck){
+@@ -836,6 +840,7 @@ class CsrPlugin(val config: CsrPluginConfig) extends Plugin[VexRiscv] with Excep
+ 
+       val hadException = RegNext(exception) init(False)
+       pipelineLiberator.done.clearWhen(hadException)
++      decode.output(FORMAL_HALT) clearWhen(pipelineLiberator.done)
+ 
+ 
+       val targetPrivilege = CombInit(interrupt.targetPrivilege)
+diff --git a/src/main/scala/vexriscv/plugin/DBusSimplePlugin.scala b/src/main/scala/vexriscv/plugin/DBusSimplePlugin.scala
+index e08b640..9b8d39e 100644
+--- a/src/main/scala/vexriscv/plugin/DBusSimplePlugin.scala
++++ b/src/main/scala/vexriscv/plugin/DBusSimplePlugin.scala
+@@ -282,6 +282,28 @@ case class DBusSimpleBus() extends Bundle with IMasterSlave{
+   }
+ }
+ 
++//Memory signals for DExIE.
++case class MemRWDexieIntf() extends Bundle with IMasterSlave{
++  //Program Counter for the instruction that causes the load/store.
++  val pc = UInt(32 bits)
++  //Set if the operation is being stalled from outside - not limited to DExIE stall on write.
++  //Compare it against the stalled signal from the DexieStallPlugin to determine whether the operation
++  // would commit if it isn't stalled by DExIE.
++  //Combinationally dependant of stall signals (see DexieStallPlugin).
++  val stuckByOthers = Bool
++  //Set if the current operation is valid and a load operation. Serves as a valid signal for pc, addr and size.
++  val read = Bool
++  //Set if the current operation is valid and a store operation. Serves as a valid signal for pc, addr, size and writeData.
++  val write = Bool
++  //Memory address of the current operation.
++  val addr = UInt(32 bits)
++  //Size of the current operation (0: 1 byte, 1: 2 bytes, 2: 4 bytes).
++  val size = UInt(2 bits)
++  //Data to store.
++  val writeData = Bits(32 bit)
++
++  override def asMaster(): Unit = out(this)
++}
+ 
+ class DBusSimplePlugin(catchAddressMisaligned : Boolean = false,
+                        catchAccessFault : Boolean = false,
+@@ -302,6 +324,8 @@ class DBusSimplePlugin(catchAddressMisaligned : Boolean = false,
+   object MEMORY_ATOMIC extends Stageable(Bool)
+   object ATOMIC_HIT extends Stageable(Bool)
+   object MEMORY_STORE extends Stageable(Bool)
++  
++  var dexieInterface : MemRWDexieIntf = null
+ 
+   var memoryExceptionPort : Flow[ExceptionCause] = null
+   var rspStage : Stage = null
+@@ -321,6 +345,8 @@ class DBusSimplePlugin(catchAddressMisaligned : Boolean = false,
+     import pipeline.config._
+     import pipeline._
+ 
++    dexieInterface = MemRWDexieIntf()
++
+     val decoderService = pipeline.service(classOf[DecoderService])
+ 
+     val stdActions = List[(Stageable[_ <: BaseType],Any)](
+@@ -420,8 +446,12 @@ class DBusSimplePlugin(catchAddressMisaligned : Boolean = false,
+ 
+       val skipCmd = False
+       skipCmd setWhen(input(ALIGNEMENT_FAULT))
+-
+-      dBus.cmd.valid := arbitration.isValid && input(MEMORY_ENABLE) && !arbitration.isStuckByOthers && !arbitration.isFlushed && !skipCmd && !cmdSent
++      
++	  //Differentiate between internal and external stall reasons.
++	  //For DExIE: If a bus r/w instruction immediately follows a branch or jump, stall for one cycle to give DExIE time to respond.
++	  val lastInstructionWasBranch = if (cmdStage == execute) memory.arbitration.isValid && memory.input(BRANCH_CTRL) =/= BranchCtrlEnum.INC else False
++	  val stallingForInternalReasons = !(arbitration.isValid && input(MEMORY_ENABLE) && !arbitration.isFlushed && !skipCmd && !cmdSent && !lastInstructionWasBranch)
++      dBus.cmd.valid := !stallingForInternalReasons && !arbitration.isStuckByOthers
+       dBus.cmd.wr := input(MEMORY_STORE)
+       dBus.cmd.size := input(INSTRUCTION)(13 downto 12).asUInt
+       dBus.cmd.payload.data := dBus.cmd.size.mux (
+@@ -429,7 +459,22 @@ class DBusSimplePlugin(catchAddressMisaligned : Boolean = false,
+         U(1) -> input(RS2)(15 downto 0) ## input(RS2)(15 downto 0),
+         default -> input(RS2)(31 downto 0)
+       )
+-      when(arbitration.isValid && input(MEMORY_ENABLE) && !dBus.cmd.ready && !skipCmd && !cmdSent){
++	  
++	  //Assign DExIE dataflow interface signals.
++	  //Helper signal that says whether a memory read/write will be committed.
++	  //Combinationally dependant of stall signals (see DexieStallPlugin).
++	  dexieInterface.stuckByOthers := arbitration.isStuckByOthers
++	  //Set the read/write valid signals even if the request is stalled through isStuckByOthers.
++	  //This ensures that DExIE can safely set dexie_df_mem_continueStore based on these dataflow taps.
++	  dexieInterface.read := !stallingForInternalReasons && dBus.cmd.ready && !dBus.cmd.wr
++	  dexieInterface.write := !stallingForInternalReasons && dBus.cmd.ready && dBus.cmd.wr
++	  //Use the bus inputs for the dataflow signals.
++	  dexieInterface.addr := dBus.cmd.address
++	  dexieInterface.size := dBus.cmd.size
++	  dexieInterface.writeData := dBus.cmd.payload.data
++	  dexieInterface.pc := input(PC)
++	  
++      when(arbitration.isValid && input(MEMORY_ENABLE) && (!dBus.cmd.ready || lastInstructionWasBranch) && !skipCmd && !cmdSent){
+         arbitration.haltItself := True
+       }
+ 
+diff --git a/src/main/scala/vexriscv/plugin/DexieStallPlugin.scala b/src/main/scala/vexriscv/plugin/DexieStallPlugin.scala
+new file mode 100644
+index 0000000..6bce702
+--- /dev/null
++++ b/src/main/scala/vexriscv/plugin/DexieStallPlugin.scala
+@@ -0,0 +1,56 @@
++package vexriscv.plugin
++
++import vexriscv._
++import spinal.core._
++import spinal.lib._
++
++//Assumes that a DBusSimplePlugin is used with emitCmdInMemoryStage = false (i.e. the memory request starts immediately after the execute phase).
++//The DBusSimplePlugin must be listed before the DexieStallPlugin in the VexRiscv config.
++class DexieStallPlugin() extends Plugin[VexRiscv] {
++  //Normal stall signal : Stalls the execute phase once all pending data bus reads and writes are complete.
++  var stall : Bool = null
++  //Stall on store signal : Stalls the execute phase if a new memory store operation is pending.
++  var stall_on_store : Bool = null
++  //Continue store signal : If set, overrides the stall on store signal and proceeds with stalled memory operations.
++  var continue_store : Bool = null
++  
++  //Output signal that is set if a memory operation is stalled because of stall_on_store.
++  var dexie_is_stalling_mem : Bool = null
++  
++  override def setup(pipeline: VexRiscv): Unit = {
++    stall = in Bool() setName("dexie_stall")
++	stall_on_store = in Bool() setName("dexie_df_mem_stallOnStore")
++	continue_store = in Bool() setName("dexie_df_mem_continueStore")
++	dexie_is_stalling_mem = out Bool() setName("dexie_df_mem_stalling")
++  }
++  
++  override def build(pipeline: VexRiscv): Unit = {
++    import pipeline._
++    import pipeline.config._
++    
++    //execute.arbitration.haltByOther.setWhen(stall)
++    var dBusPlugin = pipeline.service(classOf[DBusSimplePlugin])
++	//Copied from DBusSimplePlugin
++    val cmdSent = RegInit(False) setWhen(dBusPlugin.dBus.cmd.fire) clearWhen(!execute.arbitration.isStuck)
++    execute plug new Area {
++      import execute._
++	  
++	  //Set skipCmd as in DBusSimplePlugin for the stall on store condition.
++      val skipCmd = False
++      skipCmd setWhen(input(dBusPlugin.ALIGNEMENT_FAULT))
++	  
++	  dexie_is_stalling_mem := False
++	  //Stall if stall on store is active and a store is pending (i.e. !stallingForInternalReasons in DBusSimplePlugin).
++	  //Exclude the case where the normal stall is also set in order to align the df_mem signal behaviour with other cores.
++	  //-> DExIE ignores stores where dexie_df_mem_stalling != dexie_df_mem_stuckByOthers.
++	  when (!stall && stall_on_store && !continue_store && input(dBusPlugin.MEMORY_ENABLE) && input(dBusPlugin.MEMORY_STORE) && !skipCmd && !cmdSent && arbitration.isValid && !arbitration.isFlushed) {
++	    arbitration.haltByOther := True
++		dexie_is_stalling_mem := True
++	  }
++	  //Apply a normal stall if the stall signal is set and the execute stage is pending.
++	  when (stall && arbitration.isValid && !arbitration.isFlushed) {
++	    arbitration.haltByOther := True
++	  }
++	}
++  }
++}
+diff --git a/src/main/scala/vexriscv/plugin/RegFilePlugin.scala b/src/main/scala/vexriscv/plugin/RegFilePlugin.scala
+index a34dc46..69a5540 100644
+--- a/src/main/scala/vexriscv/plugin/RegFilePlugin.scala
++++ b/src/main/scala/vexriscv/plugin/RegFilePlugin.scala
+@@ -12,6 +12,16 @@ object ASYNC extends RegFileReadKind
+ object SYNC extends RegFileReadKind
+ 
+ 
++//Writeback signals for DExIE.
++case class RegWriteDexieIntf() extends Bundle with IMasterSlave{
++  val valid = Bool //Valid signal for pc, intRd and intVal.
++  val pc = UInt(32 bits) //The PC of the instruction that causes the writeback.
++  val intRd = UInt(5 bits) //The rd register identifier for the writeback.
++  val intVal = Bits(32 bit) //The data to write to the register identified by intRd.
++
++  override def asMaster(): Unit = out(this)
++}
++
+ class RegFilePlugin(regFileReadyKind : RegFileReadKind,
+                     zeroBoot : Boolean = false,
+                     x0Init : Boolean = true,
+@@ -21,11 +31,16 @@ class RegFilePlugin(regFileReadyKind : RegFileReadKind,
+                     withShadow : Boolean = false //shadow registers aren't transition hazard free
+                    ) extends Plugin[VexRiscv] with RegFileService{
+   import Riscv._
++  
++  var dexieInterface : RegWriteDexieIntf = null
+ 
+   override def readStage(): Stage = if(readInExecute) pipeline.execute else pipeline.decode
+ 
+   override def setup(pipeline: VexRiscv): Unit = {
+     import pipeline.config._
++
++    dexieInterface = RegWriteDexieIntf()
++    
+     val decoderService = pipeline.service(classOf[DecoderService])
+     decoderService.addDefault(RS1_USE,False)
+     decoderService.addDefault(RS2_USE,False)
+@@ -92,9 +107,19 @@ class RegFilePlugin(regFileReadyKind : RegFileReadKind,
+ 
+       def shadowPrefix(that : Bits) = if(withShadow) global.shadow.write ## that else that
+       val regFileWrite = global.regFile.writePort.addAttribute(Verilator.public).setName("lastStageRegFileWrite")
+-      regFileWrite.valid := output(REGFILE_WRITE_VALID) && arbitration.isFiring
+-      regFileWrite.address := U(shadowPrefix(output(INSTRUCTION)(rdRange)))
+-      regFileWrite.data := output(REGFILE_WRITE_DATA)
++      val regFileWrite_valid = output(REGFILE_WRITE_VALID) && arbitration.isFiring
++      val regFileWrite_address = U(shadowPrefix(output(INSTRUCTION)(rdRange)))
++      val regFileWrite_data = output(REGFILE_WRITE_DATA)
++      
++      regFileWrite.valid := regFileWrite_valid
++      regFileWrite.address := regFileWrite_address
++      regFileWrite.data := regFileWrite_data
++      
++      //Set the DExIE signals based on regFileWrite.*
++      dexieInterface.pc := input(PC)
++      dexieInterface.valid := regFileWrite_valid
++      dexieInterface.intRd := regFileWrite_address
++      dexieInterface.intVal := regFileWrite_data
+ 
+       //Ensure no boot glitches modify X0
+       if(!x0Init && zeroBoot) when(regFileWrite.address === 0){

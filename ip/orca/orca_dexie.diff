@@ -1,0 +1,649 @@
+diff --git a/ip/orca/hdl/branch_unit.vhd b/ip/orca/hdl/branch_unit.vhd
+index d39021f..939fe4f 100644
+--- a/ip/orca/hdl/branch_unit.vhd
++++ b/ip/orca/hdl/branch_unit.vhd
+@@ -33,7 +33,9 @@ entity branch_unit is
+     to_pc_correction_data      : out unsigned(REGISTER_SIZE-1 downto 0);
+     to_pc_correction_source_pc : out unsigned(REGISTER_SIZE-1 downto 0);
+     to_pc_correction_valid     : out std_logic;
+-    from_pc_correction_ready   : in  std_logic
++    from_pc_correction_ready   : in  std_logic;
++    
++    from_branch_dexie_next_pc  : out std_logic_vector(REGISTER_SIZE-1 downto 0) --Calculated next PC from branch_unit.
+     );
+ end entity branch_unit;
+ 
+@@ -173,6 +175,9 @@ begin
+         end if;
+       end if;
+     end process;
++    
++    --Since target_pc only is intended to generate mispredict corrections, use predicted_pc for correct predictions.
++    from_branch_dexie_next_pc <= std_logic_vector(target_pc) when mispredict = '1' else std_logic_vector(predicted_pc);
+   end generate no_predictor_gen;
+   has_predictor_gen : if BTB_ENTRIES > 0 generate
+     signal previously_targeted_pc                 : unsigned(REGISTER_SIZE-1 downto 0);
+@@ -215,8 +220,11 @@ begin
+     --implementations that don't do register retiming.
+     was_mispredicted       <= '1' when previously_targeted_pc /= previously_predicted_pc else '0';
+     to_pc_correction_valid <= to_pc_correction_valid_if_mispredicted and was_mispredicted;
++    
++    --Assign the next PC signal for DExIE.
++    from_branch_dexie_next_pc <= std_logic_vector(target_pc);
+   end generate has_predictor_gen;
+-
++  
+   branch_target  <= b_imm + current_pc;
+   nbranch_target <= to_unsigned(4, REGISTER_SIZE) + current_pc;
+   jalr_target    <= jalr_imm + unsigned(rs1_data);
+diff --git a/ip/orca/hdl/components.vhd b/ip/orca/hdl/components.vhd
+index 9e84ea1..88c8a0e 100644
+--- a/ip/orca/hdl/components.vhd
++++ b/ip/orca/hdl/components.vhd
+@@ -361,7 +361,29 @@ package rv_components is
+       vcp_alu_data2        : in  std_logic_vector(REGISTER_SIZE-1 downto 0) := (others => '0');
+       vcp_alu_source_valid : in  std_logic                                  := '0';
+       vcp_alu_result       : out std_logic_vector(REGISTER_SIZE-1 downto 0);
+-      vcp_alu_result_valid : out std_logic
++      vcp_alu_result_valid : out std_logic;
++      
++      ---------------------------------------------------------------------------
++      -- DExIE Signals
++      ---------------------------------------------------------------------------
++      dexie_cf_valid                     : out std_logic;                                  -- Valid signal for dexie_instruction, dexie_pc and dexie_next_pc_prediction.
++      dexie_instruction                  : out std_logic_vector(31 downto 0);              -- Current instruction.
++      dexie_pc                           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Current program counter.
++      dexie_next_pc_prediction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Prediction of the next program counter.
++      dexie_next_pc_prediction_validated : out std_logic;                                  -- Set if the current or last dexie_next_pc_correction was valid.
++      dexie_next_pc_prediction_corrected : out std_logic;                                  -- Set if dexie_next_pc_correction is valid and the last prediction was wrong.
++      dexie_next_pc_correction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Corrected next program counter.
++      dexie_data_write                   : out std_logic;                                  -- lsu: store_valid and to_lsu_valid
++      dexie_data_read                    : out std_logic;                                  -- lsu: load_valid and to_lsu_valid
++      dexie_data_addr                    : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- lsu: address_unaligned
++      dexie_data_size                    : out std_logic_vector(1 downto 0);               -- lsu: func3(1 downto 0)
++      dexie_data_write_data              : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- rs2_data
++      dexie_data_stalling                : out std_logic;                                  -- Set if a data operation stalls because of stallOnStore.
++      dexie_reg_destination              : out std_logic_vector(REGISTER_NAME_SIZE-1 downto 0); -- destination register (rd), 0 if invalid
++      dexie_reg_write_data               : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- data to be written to rd
++      dexie_stall                        : in  std_logic;                                  -- Set to stall the execute phase.
++      dexie_data_stallOnStore            : in  std_logic;                                  -- Set to stall the LSU if a store occurs.
++      dexie_data_continueStore           : in  std_logic                                   -- Set to ignore the stallOnStore signal.
+       );
+   end component orca;
+ 
+@@ -807,7 +829,29 @@ package rv_components is
+       vcp_alu_data2        : in  std_logic_vector(REGISTER_SIZE-1 downto 0);
+       vcp_alu_source_valid : in  std_logic;
+       vcp_alu_result       : out std_logic_vector(REGISTER_SIZE-1 downto 0);
+-      vcp_alu_result_valid : out std_logic
++      vcp_alu_result_valid : out std_logic;
++      
++      ---------------------------------------------------------------------------
++      -- DExIE Signals
++      ---------------------------------------------------------------------------
++      dexie_cf_valid                     : out std_logic;                                  -- Valid signal for dexie_instruction, dexie_pc and dexie_next_pc_prediction.
++      dexie_instruction                  : out std_logic_vector(31 downto 0);              -- Current instruction.
++      dexie_pc                           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Current program counter.
++      dexie_next_pc_prediction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Prediction of the next program counter.
++      dexie_next_pc_prediction_validated : out std_logic;                                  -- Set if the current or last dexie_next_pc_correction was valid.
++      dexie_next_pc_prediction_corrected : out std_logic;                                  -- Set if dexie_next_pc_correction is valid and the last prediction was wrong.
++      dexie_next_pc_correction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Corrected next program counter.
++      dexie_data_write                   : out std_logic;                                  -- lsu: store_valid and to_lsu_valid
++      dexie_data_read                    : out std_logic;                                  -- lsu: load_valid and to_lsu_valid
++      dexie_data_addr                    : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- lsu: address_unaligned
++      dexie_data_size                    : out std_logic_vector(1 downto 0);               -- lsu: func3(1 downto 0)
++      dexie_data_write_data              : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- rs2_data
++      dexie_data_stalling                : out std_logic;                                  -- Set if a data operation stalls because of stallOnStore.
++      dexie_reg_destination              : out std_logic_vector(REGISTER_NAME_SIZE-1 downto 0); -- destination register (rd), 0 if invalid
++      dexie_reg_write_data               : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- data to be written to rd
++      dexie_stall                        : in  std_logic;                                  -- Set to stall the execute phase.
++      dexie_data_stallOnStore            : in  std_logic;                                  -- Set to stall the LSU if a store occurs.
++      dexie_data_continueStore           : in  std_logic                                   -- Set to ignore the stallOnStore signal.
+       );
+   end component orca_core;
+ 
+@@ -967,7 +1011,27 @@ package rv_components is
+       vcp_alu_data2        : in  std_logic_vector(REGISTER_SIZE-1 downto 0);
+       vcp_alu_source_valid : in  std_logic;
+       vcp_alu_result       : out std_logic_vector(REGISTER_SIZE-1 downto 0);
+-      vcp_alu_result_valid : out std_logic
++      vcp_alu_result_valid : out std_logic;
++      
++      --DExIE
++      dexie_cf_valid                     : out std_logic;                                  -- Valid signal for dexie_instruction, dexie_pc and dexie_next_pc_prediction.
++      dexie_instruction                  : out std_logic_vector(31 downto 0);              -- Current instruction.
++      dexie_pc                           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Current program counter.
++      dexie_next_pc_prediction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Prediction of the next program counter.
++      dexie_next_pc_prediction_validated : out std_logic;                                  -- Set if the current or last dexie_next_pc_correction was valid.
++      dexie_next_pc_prediction_corrected : out std_logic;                                  -- Set if dexie_next_pc_correction is valid and the last prediction was wrong.
++      dexie_next_pc_correction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Corrected next program counter.
++      dexie_data_write                   : out std_logic;                                  -- lsu: store_valid and to_lsu_valid
++      dexie_data_read                    : out std_logic;                                  -- lsu: load_valid and to_lsu_valid
++      dexie_data_addr                    : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- lsu: address_unaligned
++      dexie_data_size                    : out std_logic_vector(1 downto 0);               -- lsu: func3(1 downto 0)
++      dexie_data_write_data              : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- rs2_data
++      dexie_data_stalling                : out std_logic;                                  -- Set if a data operation stalls because of stallOnStore.
++      dexie_reg_destination              : out std_logic_vector(REGISTER_NAME_SIZE-1 downto 0); -- destination register (rd), 0 if invalid
++      dexie_reg_write_data               : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- data to be written to rd
++      dexie_stall                        : in  std_logic;                                  -- Set to stall the execute phase.
++      dexie_data_stallOnStore            : in  std_logic;                                  -- Set to stall the LSU if a store occurs.
++      dexie_data_continueStore           : in  std_logic                                   -- Set to ignore the stallOnStore signal.
+       );
+   end component execute;
+ 
+@@ -1073,7 +1137,9 @@ package rv_components is
+       to_pc_correction_data      : out unsigned(REGISTER_SIZE-1 downto 0);
+       to_pc_correction_source_pc : out unsigned(REGISTER_SIZE-1 downto 0);
+       to_pc_correction_valid     : out std_logic;
+-      from_pc_correction_ready   : in  std_logic
++      from_pc_correction_ready   : in  std_logic;
++    
++      from_branch_dexie_next_pc  : out std_logic_vector(REGISTER_SIZE-1 downto 0) --Calculated next PC from branch_unit.
+       );
+   end component branch_unit;
+ 
+@@ -1104,9 +1170,18 @@ package rv_components is
+       lsu_ready      : out std_logic;
+       from_lsu_data  : out std_logic_vector(REGISTER_SIZE-1 downto 0);
+       from_lsu_valid : out std_logic;
++    
++      --DExIE signals
++      dexie_lsu_store : out std_logic; -- lsu: store_valid and to_lsu_valid
++      dexie_lsu_load  : out std_logic; -- lsu: load_valid and to_lsu_valid
++      dexie_lsu_addr  : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- lsu: address_unaligned
++      dexie_lsu_size  : out std_logic_vector(1 downto 0); -- func3(1 downto 0) of the current instruction.
++      dexie_lsu_stalling      : out  std_logic; -- Set if a data operation stalls because of stallOnStore.
++      dexie_lsu_stallOnStore  : in  std_logic;  -- Set to stall the LSU if a store occurs.
++      dexie_lsu_continueStore : in  std_logic;  -- Set to ignore the stallOnStore signal.
+ 
+       --ORCA-internal memory-mapped master
+-      oimm_address       : out    std_logic_vector(REGISTER_SIZE-1 downto 0);
++      oimm_address       : buffer std_logic_vector(REGISTER_SIZE-1 downto 0);
+       oimm_byteenable    : out    std_logic_vector((REGISTER_SIZE/8)-1 downto 0);
+       oimm_requestvalid  : buffer std_logic;
+       oimm_readnotwrite  : buffer std_logic;
+@@ -1198,6 +1273,9 @@ package rv_components is
+       to_pc_correction_valid   : out std_logic;
+       from_pc_correction_ready : in  std_logic;
+ 
++      dexie_syscall_prediction_valid : out std_logic;
++      dexie_syscall_correction_relevant : out std_logic;
++
+       from_icache_control_ready : in     std_logic;
+       to_icache_control_valid   : buffer std_logic;
+       to_icache_control_command : out    cache_control_command;
+@@ -1224,6 +1302,7 @@ package rv_components is
+       );
+   end component sys_call;
+ 
++
+   component ram_mux is
+     generic (
+       ADDRESS_WIDTH : natural;
+diff --git a/ip/orca/hdl/execute.vhd b/ip/orca/hdl/execute.vhd
+index 50ee4cc..9c1e546 100644
+--- a/ip/orca/hdl/execute.vhd
++++ b/ip/orca/hdl/execute.vhd
+@@ -126,7 +126,27 @@ entity execute is
+     vcp_alu_data2        : in  std_logic_vector(REGISTER_SIZE-1 downto 0);
+     vcp_alu_source_valid : in  std_logic;
+     vcp_alu_result       : out std_logic_vector(REGISTER_SIZE-1 downto 0);
+-    vcp_alu_result_valid : out std_logic
++    vcp_alu_result_valid : out std_logic;
++    
++    --DExIE
++    dexie_cf_valid                     : out std_logic;                                  -- Valid signal for dexie_instruction, dexie_pc and dexie_next_pc_prediction.
++    dexie_instruction                  : out std_logic_vector(31 downto 0);              -- Current instruction.
++    dexie_pc                           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Current program counter.
++    dexie_next_pc_prediction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Prediction of the next program counter.
++    dexie_next_pc_prediction_validated : out std_logic;                                  -- Set if the current or last dexie_next_pc_correction was valid.
++    dexie_next_pc_prediction_corrected : out std_logic;                                  -- Set if dexie_next_pc_correction is valid and the last prediction was wrong.
++    dexie_next_pc_correction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Corrected next program counter.
++    dexie_data_write                   : out std_logic;                                  -- lsu: store_valid and to_lsu_valid
++    dexie_data_read                    : out std_logic;                                  -- lsu: load_valid and to_lsu_valid
++    dexie_data_addr                    : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- lsu: address_unaligned
++    dexie_data_size                    : out std_logic_vector(1 downto 0);               -- lsu: func3(1 downto 0)
++    dexie_data_write_data              : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- rs2_data
++    dexie_data_stalling                : out std_logic;                                  -- Set if a data operation stalls because of stallOnStore.
++    dexie_reg_destination              : out std_logic_vector(REGISTER_NAME_SIZE-1 downto 0); -- destination register (rd), 0 if invalid
++    dexie_reg_write_data               : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- data to be written to rd
++    dexie_stall                        : in  std_logic;                                  -- Set to stall the execute phase.
++    dexie_data_stallOnStore            : in  std_logic;                                  -- Set to stall the LSU if a store occurs.
++    dexie_data_continueStore           : in  std_logic                                   -- Set to ignore the stallOnStore signal.
+     );
+ end entity execute;
+ 
+@@ -210,12 +230,27 @@ architecture behavioural of execute is
+ 
+   signal syscall_to_pc_correction_valid : std_logic;
+   signal syscall_to_pc_correction_data  : unsigned(REGISTER_SIZE-1 downto 0);
++  
++  signal dexie_syscall_prediction_valid : std_logic;
++  signal dexie_syscall_correction_relevant : std_logic;
+ 
+   signal from_writeback_ready : std_logic;
+   signal to_rf_mux            : std_logic_vector(1 downto 0);
+   signal vcp_writeback_select : std_logic;
+ 
+   signal from_branch_misaligned : std_logic;
++  
++  signal from_branch_dexie_next_pc : std_logic_vector(REGISTER_SIZE-1 downto 0); --Calculated next PC from branch_unit.
++  signal instruction_is_new : std_logic; --DExIE helper signal : Set if from_execute_ready was set during the last cycle.
++  --DExIE helper signal : Set if instruction_is_new was set once during a cycle with dexie_stall.
++  --There either is a new instruction or no instruction pending, depending on to_execute_valid.
++  signal stall_got_new_instruction : std_logic; 
++  signal stall_execution_unit_inputs : std_logic;
++  signal unit_inputs_are_valid : std_logic; --DExIE helper signal : Set if any to_<unit>_valid signals are set.
++  signal unit_inputs_were_valid : std_logic; --DExIE helper signal : Set if any to_<unit>_valid signals were set since the last from_execute_ready.
++  signal lsu_was_stalled : std_logic; --DExIE helper signal : Set if the LSU was stalled since the last from_execute_ready.
++  signal from_lsu_stalling : std_logic;
++  signal dexie_cf_is_valid : std_logic;
+ begin
+   --Decode instruction; could get pushed back to decode stage
+   process (opcode) is
+@@ -277,17 +312,24 @@ begin
+   --was not true, which might slightly complicate logic but would allow some
+   --optimizations such as allowing a multicycle ALU op
+   --(multiply/shift/div/etc.) to start while waiting for a load to return.
+-  to_alu_valid     <= alu_select and to_execute_valid and from_writeback_ready;
+-  to_branch_valid  <= branch_select and to_execute_valid and from_writeback_ready;
+-  to_lsu_valid     <= lsu_select and to_execute_valid and from_writeback_ready;
+-  to_syscall_valid <= syscall_select and to_execute_valid and from_writeback_ready;
+-  to_vcp_valid     <= vcp_select and to_execute_valid and from_writeback_ready;
+-
+-  from_execute_ready <= (not to_execute_valid) or (from_writeback_ready and
++  
++  --A regular DExIE stall disables any execution unit inputs, as soon as the first cycle of a new instruction starts.
++  stall_execution_unit_inputs <= dexie_stall and ((instruction_is_new or stall_got_new_instruction) or (lsu_select and lsu_was_stalled));
++  
++  to_alu_valid     <= alu_select and to_execute_valid and from_writeback_ready and (not stall_execution_unit_inputs);
++  to_branch_valid  <= branch_select and to_execute_valid and from_writeback_ready and (not stall_execution_unit_inputs);
++  to_lsu_valid     <= lsu_select and to_execute_valid and from_writeback_ready and (not stall_execution_unit_inputs);
++  to_syscall_valid <= syscall_select and to_execute_valid and from_writeback_ready and (not stall_execution_unit_inputs);
++  to_vcp_valid     <= vcp_select and to_execute_valid and from_writeback_ready and (not stall_execution_unit_inputs);
++  
++  unit_inputs_are_valid <= to_alu_valid or to_branch_valid or to_lsu_valid or to_syscall_valid or to_vcp_valid;
++  --Don't read more than one new instruction if a stall is active.
++  from_execute_ready <= (not stall_execution_unit_inputs) and 
++                                        ((not to_execute_valid) or (from_writeback_ready and
+                                                    (((not lsu_select) or from_lsu_ready) and
+                                                     ((not alu_select) or from_alu_ready) and
+                                                     ((not syscall_select) or from_syscall_ready) and
+-                                                    ((not vcp_select) or vcp_ready)));
++                                                    ((not vcp_select) or vcp_ready))));
+ 
+ 
+ 
+@@ -301,6 +343,27 @@ begin
+   --New instruction retired, for incrementing MINSTRET(H).
+   new_instret <= to_execute_valid and from_execute_ready and (not illegal_instruction);
+ 
++  process (clk)
++  begin
++    if rising_edge(clk) then
++      if reset = '1' then
++        instruction_is_new <= '0';
++        stall_got_new_instruction <= '0';
++        unit_inputs_were_valid <= '0';
++		lsu_was_stalled <= '0';
++      else
++        if dexie_stall = '0' or instruction_is_new = '1' then
++          lsu_was_stalled <= (to_lsu_valid and from_lsu_stalling);
++        end if;
++        if unit_inputs_were_valid = '0' or instruction_is_new = '1' then
++          --Make sure unit_inputs_were_valid stays at 1 unless a new instruction arrives.
++          unit_inputs_were_valid <= unit_inputs_are_valid;
++        end if;
++        instruction_is_new <= from_execute_ready;
++        stall_got_new_instruction <= dexie_stall and (instruction_is_new or stall_got_new_instruction);
++      end if;
++    end if;
++  end process;
+ 
+   -----------------------------------------------------------------------------
+   -- REGISTER FORWADING
+@@ -415,9 +478,13 @@ begin
+       to_pc_correction_data      => branch_to_pc_correction_data,
+       to_pc_correction_source_pc => to_pc_correction_source_pc,
+       to_pc_correction_valid     => branch_to_pc_correction_valid,
+-      from_pc_correction_ready   => from_pc_correction_ready
++      from_pc_correction_ready   => from_pc_correction_ready,
++      
++      from_branch_dexie_next_pc  => from_branch_dexie_next_pc
+       );
+-
++  
++  dexie_data_write_data <= rs2_data; --The write data for this LSU always is rs2.
++  dexie_data_stalling <= from_lsu_stalling;
+   ls_unit : load_store_unit
+     generic map (
+       REGISTER_SIZE       => REGISTER_SIZE,
+@@ -445,6 +512,14 @@ begin
+       lsu_ready      => from_lsu_ready,
+       from_lsu_data  => from_lsu_data,
+       from_lsu_valid => from_lsu_valid,
++      
++      dexie_lsu_store => dexie_data_write,
++      dexie_lsu_load  => dexie_data_read,
++      dexie_lsu_addr  => dexie_data_addr,
++      dexie_lsu_size  => dexie_data_size,
++      dexie_lsu_stalling => from_lsu_stalling,
++      dexie_lsu_stallOnStore => dexie_data_stallOnStore,
++      dexie_lsu_continueStore => dexie_data_continueStore,
+ 
+       oimm_address       => lsu_oimm_address,
+       oimm_byteenable    => lsu_oimm_byteenable,
+@@ -512,6 +587,9 @@ begin
+       to_pc_correction_data    => syscall_to_pc_correction_data,
+       to_pc_correction_valid   => syscall_to_pc_correction_valid,
+       from_pc_correction_ready => from_pc_correction_ready,
++      
++      dexie_syscall_prediction_valid => dexie_syscall_prediction_valid,
++      dexie_syscall_correction_relevant => dexie_syscall_correction_relevant,
+ 
+       from_icache_control_ready => from_icache_control_ready,
+       to_icache_control_valid   => to_icache_control_valid,
+@@ -590,6 +668,18 @@ begin
+   --register.
+   execute_idle <= lsu_idle and (not to_pc_correction_valid);
+ 
++  dexie_cf_is_valid        <= unit_inputs_are_valid and ((not unit_inputs_were_valid) or instruction_is_new); -- Ready if the execute stage inputs just became valid.
++  dexie_cf_valid           <= dexie_cf_is_valid;
++  dexie_instruction        <= to_execute_instruction(INSTRUCTION32'range);  --Current instruction (as passed to the *_unit and sys_call modules above)
++  dexie_pc                 <= std_logic_vector(to_execute_program_counter); --The current program counter is not affected by mispredicts at this stage.
++  dexie_next_pc_prediction <= from_branch_dexie_next_pc when to_branch_valid = '1' else 
++                              std_logic_vector(to_execute_predicted_pc); --Pass on the prediction or branch correction.
++  
++  dexie_next_pc_prediction_validated <= dexie_cf_is_valid when to_syscall_valid = '0' else -- If a new instruction cannot cause corrections by syscall, confirm the prediction or early correction immediately.
++                                       dexie_syscall_prediction_valid; -- If the syscall unit will not correct the prediction, confirm it.
++  -- If the prediction is corrected by syscall and is relevant, pass the correction on to DExIE. Prevent duplication of corrections using the ready signal.
++  dexie_next_pc_prediction_corrected <= syscall_to_pc_correction_valid and dexie_syscall_correction_relevant and from_pc_correction_ready;
++  dexie_next_pc_correction <= std_logic_vector(syscall_to_pc_correction_data);
+ 
+   ------------------------------------------------------------------------------
+   -- Writeback
+@@ -627,6 +717,9 @@ begin
+                                              from_branch_valid or
+                                              (from_alu_valid and (not vcp_writeback_select)));
+ 
++  --Assign the DExIE register signals using the Register File inputs. REGISTER_ZERO is used as the invalid signal.
++  dexie_reg_destination <= to_rf_select when to_rf_valid = '1' else REGISTER_ZERO;
++  dexie_reg_write_data <= to_rf_data;
+ 
+ 
+   -------------------------------------------------------------------------------
+diff --git a/ip/orca/hdl/load_store_unit.vhd b/ip/orca/hdl/load_store_unit.vhd
+index 5dc688c..d5a2aeb 100644
+--- a/ip/orca/hdl/load_store_unit.vhd
++++ b/ip/orca/hdl/load_store_unit.vhd
+@@ -33,8 +33,17 @@ entity load_store_unit is
+     from_lsu_data  : out std_logic_vector(REGISTER_SIZE-1 downto 0);
+     from_lsu_valid : out std_logic;
+ 
++    --DExIE signals
++    dexie_lsu_store : out std_logic; -- lsu: store_valid and to_lsu_valid
++    dexie_lsu_load  : out std_logic; -- lsu: load_valid and to_lsu_valid
++    dexie_lsu_addr  : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- lsu: address_unaligned
++    dexie_lsu_size  : out std_logic_vector(1 downto 0); -- func3(1 downto 0) of the current instruction.
++    dexie_lsu_stalling      : out  std_logic; -- Set if a data operation stalls because of stallOnStore.
++    dexie_lsu_stallOnStore  : in  std_logic;  -- Set to stall the LSU if a store occurs.
++    dexie_lsu_continueStore : in  std_logic;  -- Set to ignore the stallOnStore signal.
++
+     --ORCA-internal memory-mapped master
+-    oimm_address       : out    std_logic_vector(REGISTER_SIZE-1 downto 0);
++    oimm_address       : buffer    std_logic_vector(REGISTER_SIZE-1 downto 0);
+     oimm_byteenable    : out    std_logic_vector((REGISTER_SIZE/8)-1 downto 0);
+     oimm_requestvalid  : buffer std_logic;
+     oimm_readnotwrite  : buffer std_logic;
+@@ -75,6 +84,8 @@ architecture rtl of load_store_unit is
+   signal store_valid  : std_logic;
+   signal load_select  : std_logic;
+   signal load_valid   : std_logic;
++  
++  signal stalling     : std_logic; --DExIE signal : is the LSU stalling because of stall on store?
+ begin
+   --Decode instruction to select submodule.  All paths must decode to exactly
+   --one submodule.
+@@ -109,9 +120,9 @@ begin
+       end if;
+     end if;
+   end process;
+-
++  
+   --Check for unaligned accesses.  Disabled until properly merged exported to sys_call
+-  from_alignment_illegal <= to_lsu_valid  when (ENABLE_EXCEPTIONS and
++  from_alignment_illegal <= (to_lsu_valid)  when (ENABLE_EXCEPTIONS and
+                                       ((func3(1) = '1' and address_unaligned(1 downto 0) /= "00") or
+                                        (func3(0) = '1' and address_unaligned(0) /= '0')))
+                             else '0';
+@@ -120,8 +131,20 @@ begin
+ 
+   store_valid <= store_select and (not from_alignment_illegal);
+   load_valid  <= load_select and (not from_alignment_illegal);
+-
+-  oimm_requestvalid <= (load_valid or store_valid) and to_lsu_valid;
++  
++  --Assign the DExIE outputs.
++  --Stall if stallOnStore is set (while continueStore isn't) and there is a valid store.
++  stalling <= dexie_lsu_stallOnStore and (not dexie_lsu_continueStore) and to_lsu_valid and store_select;
++  dexie_lsu_stalling <= store_valid and dexie_lsu_stallOnStore and (not dexie_lsu_continueStore);
++  dexie_lsu_store <= store_valid and to_lsu_valid;
++  dexie_lsu_load <= load_valid and to_lsu_valid;
++  --Use the raw address before any alignment specific to Orca is applied.
++  dexie_lsu_addr <= address_unaligned;
++  --The lower two bits of funct3 are the size : 00 for 1 byte, 01 for 2 bytes, 10 for 4 bytes.
++  dexie_lsu_size <= func3(1 downto 0);
++
++  --Request valid condition extended with the stall condition.
++  oimm_requestvalid <= (load_valid or (store_valid and ((not dexie_lsu_stallOnStore) or dexie_lsu_continueStore))) and to_lsu_valid;
+   oimm_readnotwrite <= '1' when opcode(5) = LOAD_OP(5) else '0';
+ 
+   imm <= instruction(31 downto 25) & instruction(11 downto 7) when instruction(5) = '1'
+@@ -158,7 +181,8 @@ begin
+   --Stall if sending a request and slave is not ready or if awaiting readdata
+   --and it hasn't arrived yet
+   writeback_stall_from_lsu <= load_in_progress and (not oimm_readdatavalid);
+-  lsu_ready                <= ((not load_valid) and (not store_valid)) or (not oimm_waitrequest);
++  --Don't accept any new LSU requests during a DExIE stall.
++  lsu_ready                <= ((not load_valid) and (not store_valid)) or (not oimm_waitrequest and not stalling);
+   lsu_idle                 <= not load_in_progress;  --idle is state-only
+ 
+   process(clk)
+diff --git a/ip/orca/hdl/orca.vhd b/ip/orca/hdl/orca.vhd
+index 6de7af3..c7709d9 100644
+--- a/ip/orca/hdl/orca.vhd
++++ b/ip/orca/hdl/orca.vhd
+@@ -364,7 +364,29 @@ entity orca is
+     vcp_alu_source_valid : in std_logic                                  := '0';
+ 
+     vcp_alu_result       : out std_logic_vector(REGISTER_SIZE-1 downto 0);
+-    vcp_alu_result_valid : out std_logic
++    vcp_alu_result_valid : out std_logic;
++    
++    ---------------------------------------------------------------------------
++    -- DExIE Signals
++    ---------------------------------------------------------------------------
++    dexie_cf_valid                     : out std_logic;                                  -- Valid signal for dexie_instruction, dexie_pc and dexie_next_pc_prediction.
++    dexie_instruction                  : out std_logic_vector(31 downto 0);              -- Current instruction.
++    dexie_pc                           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Current program counter.
++    dexie_next_pc_prediction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Prediction of the next program counter.
++    dexie_next_pc_prediction_validated : out std_logic;                                  -- Set if the current or last dexie_next_pc_correction was valid.
++    dexie_next_pc_prediction_corrected : out std_logic;                                  -- Set if dexie_next_pc_correction is valid and the last prediction was wrong.
++    dexie_next_pc_correction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Corrected next program counter.
++	dexie_data_write                   : out std_logic;                                  -- lsu: store_valid and to_lsu_valid
++	dexie_data_read                    : out std_logic;                                  -- lsu: load_valid and to_lsu_valid
++    dexie_data_addr                    : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- lsu: address_unaligned
++	dexie_data_size                    : out std_logic_vector(1 downto 0);               -- lsu: func3(1 downto 0)
++    dexie_data_write_data              : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- rs2_data
++	dexie_data_stalling                : out std_logic;                                  -- Set if a data operation stalls because of stallOnStore.
++	dexie_reg_destination              : out std_logic_vector(REGISTER_NAME_SIZE-1 downto 0); -- destination register (rd), 0 if invalid
++	dexie_reg_write_data               : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- data to be written to rd
++	dexie_stall                        : in  std_logic;                                  -- Set to stall the execute phase.
++	dexie_data_stallOnStore            : in  std_logic;                                  -- Set to stall the LSU if a store occurs.
++	dexie_data_continueStore           : in  std_logic                                   -- Set to ignore the stallOnStore signal.
+     );
+ end entity orca;
+ 
+@@ -529,6 +551,26 @@ begin
+       vcp_alu_source_valid => vcp_alu_source_valid,
+       vcp_alu_result       => vcp_alu_result,
+       vcp_alu_result_valid => vcp_alu_result_valid,
++	  
++      --DExIE signals
++      dexie_cf_valid                     => dexie_cf_valid,
++      dexie_instruction                  => dexie_instruction,
++      dexie_pc                           => dexie_pc,
++      dexie_next_pc_prediction           => dexie_next_pc_prediction,
++      dexie_next_pc_prediction_validated => dexie_next_pc_prediction_validated,
++      dexie_next_pc_prediction_corrected => dexie_next_pc_prediction_corrected,
++      dexie_next_pc_correction           => dexie_next_pc_correction,
++      dexie_data_write                   => dexie_data_write,
++      dexie_data_read                    => dexie_data_read,
++      dexie_data_addr                    => dexie_data_addr,
++	  dexie_data_size                    => dexie_data_size,
++      dexie_data_write_data              => dexie_data_write_data, 
++	  dexie_data_stalling                => dexie_data_stalling,
++      dexie_reg_destination              => dexie_reg_destination, 
++      dexie_reg_write_data               => dexie_reg_write_data, 
++      dexie_stall                        => dexie_stall, --to execute
++	  dexie_data_stallOnStore            => dexie_data_stallOnStore, --to execute.load_store_unit
++	  dexie_data_continueStore           => dexie_data_continueStore, --to execute.load_store_unit
+ 
+       --Auxiliary/Uncached memory regions
+       amr_base_addrs => amr_base_addrs,
+diff --git a/ip/orca/hdl/orca_core.vhd b/ip/orca/hdl/orca_core.vhd
+index ccbfea1..16bc501 100644
+--- a/ip/orca/hdl/orca_core.vhd
++++ b/ip/orca/hdl/orca_core.vhd
+@@ -101,13 +101,32 @@ entity orca_core is
+     vcp_alu_data2        : in  std_logic_vector(REGISTER_SIZE-1 downto 0);
+     vcp_alu_source_valid : in  std_logic;
+     vcp_alu_result       : out std_logic_vector(REGISTER_SIZE-1 downto 0);
+-    vcp_alu_result_valid : out std_logic
++    vcp_alu_result_valid : out std_logic;
++    
++    --DExIE
++    dexie_cf_valid                     : out std_logic;                                  -- Valid signal for dexie_instruction, dexie_pc and dexie_next_pc_prediction.
++    dexie_instruction                  : out std_logic_vector(31 downto 0);              -- Current instruction.
++    dexie_pc                           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Current program counter.
++    dexie_next_pc_prediction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Prediction of the next program counter.
++    dexie_next_pc_prediction_validated : out std_logic;                                  -- Set if the current or last dexie_next_pc_correction was valid.
++    dexie_next_pc_prediction_corrected : out std_logic;                                  -- Set if dexie_next_pc_correction is valid and the last prediction was wrong.
++    dexie_next_pc_correction           : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- Corrected next program counter.
++	dexie_data_write                   : out std_logic;                                  -- lsu: store_valid and to_lsu_valid
++	dexie_data_read                    : out std_logic;                                  -- lsu: load_valid and to_lsu_valid
++    dexie_data_addr                    : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- lsu: address_unaligned
++	dexie_data_size                    : out std_logic_vector(1 downto 0);               -- lsu: func3(1 downto 0)
++    dexie_data_write_data              : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- rs2_data
++	dexie_data_stalling                : out std_logic;                                  -- Set if a data operation stalls because of stallOnStore.
++	dexie_reg_destination              : out std_logic_vector(REGISTER_NAME_SIZE-1 downto 0); -- destination register (rd), 0 if invalid
++	dexie_reg_write_data               : out std_logic_vector(REGISTER_SIZE-1 downto 0); -- data to be written to rd
++	dexie_stall                        : in  std_logic;                                  -- Set to stall the execute phase.
++	dexie_data_stallOnStore            : in  std_logic;                                  -- Set to stall the LSU if a store occurs.
++	dexie_data_continueStore           : in  std_logic                                   -- Set to ignore the stallOnStore signal.
+     );
+ end entity orca_core;
+ 
+ architecture rtl of orca_core is
+   signal pause_ifetch : std_logic;
+-
+   signal ifetch_idle  : std_logic;
+   signal decode_idle  : std_logic;
+   signal execute_idle : std_logic;
+@@ -150,7 +169,6 @@ architecture rtl of orca_core is
+   signal to_ifetch_pause_ifetch    : std_logic;
+ 
+ begin
+-
+   to_ifetch_pause_ifetch <= (not (from_decode_incomplete_instruction and ifetch_idle)) and from_execute_pause_ifetch;
+   I : instruction_fetch
+     generic map (
+@@ -336,9 +354,28 @@ begin
+       vcp_alu_data2        => vcp_alu_data2,
+       vcp_alu_source_valid => vcp_alu_source_valid,
+       vcp_alu_result       => vcp_alu_result,
+-      vcp_alu_result_valid => vcp_alu_result_valid
++      vcp_alu_result_valid => vcp_alu_result_valid,
++	  
++	  
++      dexie_cf_valid                     => dexie_cf_valid,
++      dexie_instruction                  => dexie_instruction,
++      dexie_pc                           => dexie_pc,
++      dexie_next_pc_prediction           => dexie_next_pc_prediction,
++      dexie_next_pc_prediction_validated => dexie_next_pc_prediction_validated,
++      dexie_next_pc_prediction_corrected => dexie_next_pc_prediction_corrected,
++      dexie_next_pc_correction           => dexie_next_pc_correction,
++      dexie_data_write                   => dexie_data_write,
++      dexie_data_read                    => dexie_data_read,
++      dexie_data_addr                    => dexie_data_addr,
++	  dexie_data_size                    => dexie_data_size,
++      dexie_data_write_data              => dexie_data_write_data, 
++	  dexie_data_stalling                => dexie_data_stalling,
++      dexie_reg_destination              => dexie_reg_destination, 
++      dexie_reg_write_data               => dexie_reg_write_data, 
++      dexie_stall                        => dexie_stall, --to execute
++	  dexie_data_stallOnStore            => dexie_data_stallOnStore, --to execute.load_store_unit
++	  dexie_data_continueStore           => dexie_data_continueStore --to execute.load_store_unit
+       );
+ 
+   core_idle <= ifetch_idle and decode_idle and execute_idle;
+-
+ end architecture rtl;
+diff --git a/ip/orca/hdl/sys_call.vhd b/ip/orca/hdl/sys_call.vhd
+index 3cdf173..4095d27 100644
+--- a/ip/orca/hdl/sys_call.vhd
++++ b/ip/orca/hdl/sys_call.vhd
+@@ -64,6 +64,9 @@ entity sys_call is
+     to_pc_correction_data    : out unsigned(REGISTER_SIZE-1 downto 0);
+     to_pc_correction_valid   : out std_logic;
+     from_pc_correction_ready : in  std_logic;
++    
++    dexie_syscall_prediction_valid : out std_logic;
++    dexie_syscall_correction_relevant : out std_logic;
+ 
+     from_icache_control_ready : in     std_logic;
+     to_icache_control_valid   : buffer std_logic;
+@@ -147,6 +150,9 @@ architecture rtl of sys_call is
+   signal interrupt_pending             : std_logic;
+   signal interrupt_pc_correction_valid : std_logic;
+ 
++  --Combinational helper signals for DExIE.
++  signal is_illegal_or_call : std_logic;
++  signal is_interrupt       : std_logic;
+ 
+   --Uncached/Auxiliary memory region CSR signals.  Will be assigned 0's if unused.
+   type csr_vector is array (natural range <>) of std_logic_vector(REGISTER_SIZE-1 downto 0);
+@@ -431,6 +437,12 @@ begin
+     mstatus(CSR_MSTATUS_MPIE-1 downto CSR_MSTATUS_MIE+1) <= (others => '0');
+     mstatus(CSR_MSTATUS_MIE-1 downto 0)                  <= (others => '0');
+     mcause(mcause'left-1 downto CSR_MCAUSE_CODE'left+1)  <= (others => '0');
++    --DExIE helpers. Conditions from the process block above.
++    is_illegal_or_call <= (illegal_instruction or
++           from_lsu_addr_misalign or
++           from_branch_misaligned or
++           (to_syscall_valid and (ebreak_select or ecall_select)));
++    is_interrupt <= interrupt_pending and core_idle;
+   end generate exceptions_gen;
+   no_exceptions_gen : if not ENABLE_EXCEPTIONS generate
+     mtvec                         <= (others => '0');
+@@ -440,6 +452,8 @@ begin
+     mstatus                       <= (others => '0');
+     mepc                          <= (others => '0');
+     mcause                        <= (others => '0');
++    is_illegal_or_call            <= '0';
++    is_interrupt                  <= '0';
+   end generate no_exceptions_gen;
+ 
+   memory_region_registers_gen : for gregister in 3 downto 0 generate
+@@ -747,6 +761,11 @@ begin
+ 
+   pause_ifetch <= fence_pending or interrupt_pending;
+ 
++  -- Combinationally validate predictions for DExIE CF.
++  dexie_syscall_prediction_valid <= (not mret_select) and (not is_illegal_or_call) and (not is_interrupt);
++  -- Ignore corrections for fences, since those don't change the PC but only flush the pipeline.
++  dexie_syscall_correction_relevant <= was_mret or was_illegal or interrupt_pc_correction_valid;
++
+   -- There are several reasons that sys_calls might send a pc correction
+   -- global interrupt
+   -- illegal instruction
