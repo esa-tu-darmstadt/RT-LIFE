@@ -10,10 +10,10 @@ RISC-V Toolchain https://github.com/riscv/riscv-gnu-toolchain
 
 **Project structure:**   
 - Folder `core` contains RT-LIFE core wrappers and rudimentary SecMon dummies.  
-- Folder `ip` contains the RT-LIFE extended cores. These originate from TaPaSCo RISC-V  
+- Folder `ip` contains the RT-LIFE extended cores together with their individual diffs. These originate from the TaPaSCo RISC-V repository.  
 - Folder `testPrograms` contains a number of small application examples.  
 - The project's `root directory` contains the project packaging scripts.  
-- Folder `dexie_ip` contains the final resulting TaPaSCo-PE  
+- After generation, folder `dexie_ip` contains the final resulting TaPaSCo-PE.  
 
 **First steps:**  
 - Run `make binaries`    
@@ -21,13 +21,13 @@ RISC-V Toolchain https://github.com/riscv/riscv-gnu-toolchain
 - Sample ELF object files can be found in: `testPrograms/en_*/elf`    
 - Have a closer look on CF, memory write and register write instructions  
 
-- Look into `core/DexieReg_Nested`, `core/DexieMem_Nested` and `core/DexieCF_Nested`
-- Play with the dummy Security Monitors in the middle of these files
+- Have a closer look on `core/DexieReg_Nested`, `core/DexieMem_Nested` and `core/DexieCF_Nested`
+- Understand and edit the dummy Security Monitors in the middle of these files.
 
 - `make taiga_pe` (or any other core)
 - Using `tapasco-import`, `tapasco-compose` and `tapasco load-bitstream`, the design can be deloyed on any TaPaSCo-compatible FPGA board.
 
-- Be aware, that the first 16 words (64 Bytes) are dummy input for the dummy Security Monitors (currently not interpreted). Subsequent data is written into the instruction memory.
+- Be aware, that the first 16 words (64 Bytes) are configuration input for the dummy Security Monitors (currently not interpreted). Subsequent data is written into the instruction memory of the attached RISC-V core.
 
 **License:**
 
