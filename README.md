@@ -10,10 +10,10 @@ How latency is reduced:
 - Plain signals, neither compression nor delta encoding
 - Tapping of signals in early pipeline stages
 - Two types of precise stalls 
-	- CF stall: Stalls execute and later stages.
+	- CF stall: Stalls the execute stage and later stages.
 	- Stall on Store: Combinatorially stalls memory writes as late as possible.
 
-By now RT-LIFE focuses on 32 bit IoT-class RISC-V cores, which are single-core, single-issue and in-order.
+By now RT-LIFE focuses on 32 bit IoT-class RISC-V cores, which are single-core, single-issue, and in-order type.
 Supported cores are:
 - Flute
 - Orca
@@ -26,7 +26,7 @@ Supported cores are:
 | Tapasco Host | <--- 1 ---> | [SecurityMonitor <--- 2 ---> RISC-V Core] |
 |--|--|--|
 
-The [TaPaSCo](https://git.esa.informatik.tu-darmstadt.de/tapasco/tapasco) framework is used for rapid prototyping. A dummy security monitor is packet together with the RISC-V inside a TaPaSCo-PE.  In the following, we differentiate between PE-external (1) and PE-internal (2) signals:
+The [TaPaSCo](https://git.esa.informatik.tu-darmstadt.de/tapasco/tapasco) framework is used for rapid prototyping. A dummy security monitor is packed together with the chosen RISC-V core inside a TaPaSCo-PE. In the following, we differentiate between PE-external (1) and PE-internal (2) signals:
 
 
 
@@ -39,7 +39,7 @@ The [TaPaSCo](https://git.esa.informatik.tu-darmstadt.de/tapasco/tapasco) framew
 |<--- 1 --- | Reset, Interrupt via CTRL AXI|
 |--- 2 ---> | Reset, AXI for forwarding (checked) RISC-V core memory contents|
 || Stalls: CF-Stall, Stall on Store, Continue Stall|
-|<--- 2 --- | CF: PC, Instruction, Next PC|
+|<--- 2 --- | Control Flow: PC, Instruction, Next PC|
 | |Memory Store: Valid, PC, Address, Size, Data, Stall Active |
 | |Register Writeback: PC, Target Register (0=invalid), Data |
 
@@ -70,7 +70,7 @@ RISC-V Toolchain https://github.com/riscv/riscv-gnu-toolchain
 - `make taiga_pe` (or any other core)
 - Using `tapasco-import`, `tapasco-compose` and `tapasco load-bitstream`, the design can be deloyed on any TaPaSCo-compatible FPGA board.
 
-- Be aware, that the first 16 words (64 Bytes) are configuration input for the dummy Security Monitors (currently not interpreted). Subsequent data is written into the instruction memory of the attached RISC-V core.
+- Be aware, that the first 16 words (64 Bytes) are configuration input for the dummy Security Monitors (currently not interpreted). Only subsequent data is written into the instruction memory of the attached RISC-V core.
 
 **License:**
 
