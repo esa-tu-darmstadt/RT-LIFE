@@ -2,7 +2,7 @@
 
 **Description**
 RT-LIFE is a framework, which standardizes an interface between a processor and an attached security monitor.
-Based on a unified behavior, the main goal is high portability for compatible security monitors.
+Based on a unified behavior, its main goal is high portability for compatible security monitors.
 
 Compared to existing interfaces that are optimized for tracing or debugging (and could also be used for monitoring), RT-LIFE is fitted for minimal latency. Latency is crucial, since security monitors are typically most useful, if they guarantee to prevent the core from executing malicious code ASAP with no or limited impact to the outside world. Depending on the individual core (its pipeline, its signal taps, its write latency...) and the intended security guarantees, even with RT-LIFE only 1 or 2 clock cycles remain for the monitor's security evaluation. Of course, evaluation time can be extended via stall signals. 
 
