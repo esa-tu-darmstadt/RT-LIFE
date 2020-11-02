@@ -1,15 +1,12 @@
 # RT-LIFE: A Portable Interface for Real-Time Lightweight Integrity Enforcement of RISC-V Cores
 
 **Description**
-RT-LIFE is a framework, which standardizes an interface between a processor and an attached security monitor.
-Based on a unified behavior, its main goal is high portability for compatible security monitors.
-
-Compared to existing interfaces that are optimized for tracing or debugging (and could also be used for monitoring), RT-LIFE is fitted for minimal latency. Latency is crucial, since security monitors are typically most useful, if they guarantee to prevent the core from executing malicious code ASAP with no or limited impact to the outside world. Depending on the individual core (its pipeline, its signal taps, its write latency...) and the intended security guarantees, even with RT-LIFE only 1 or 2 clock cycles remain for the monitor's security evaluation. Of course, evaluation time can be extended via stall signals. 
+RT-LIFE is a framework, which standardizes an interface between a processor and an attached security monitor. Based on a unified behavior, its main goal is high portability for compatible security monitors. Existing interfaces are optimized for tracing [[1]](https://github.com/riscv/riscv-trace-spec), debugging [[2]](https://github.com/riscv/riscv-debug-spec) or formal verification [[3]](https://github.com/SymbioticEDA/riscv-formal) and focus on already commited instructions. As an alternative, RT-LIFE is fitted for minimal latency and focuses on uncommited instructions. For security monitors, an interface with minimal latency is crucial: Such monitors are typically most useful, if they can guarantee to prevent the core from executing malicious code ASAP with no or limited impact to the outside world. Depending on the individual core (its pipeline, its signal taps, its write latency...) and the intended security guarantees, even with RT-LIFE only 0 (combinatorial) - 2 clock cycles remain for the monitor's security evaluation. Of course, evaluation time can be extended via stall signals. 
 
 How latency is reduced: 
 - Plain signals, neither compression nor delta encoding
 - Tapping of signals in early pipeline stages
-- Two types of precise stalls 
+- Two types of precise stalls
 	- CF stall: Stalls the execute stage and later stages.
 	- Stall on Store: Combinatorially stalls memory writes as late as possible.
 
@@ -23,12 +20,10 @@ Supported cores are:
 - [VexRiscv](https://github.com/SpinalHDL/VexRiscv)
 
 **Architecture**
-| Tapasco Host | <--- 1 ---> | [SecurityMonitor <--- 2 ---> RISC-V Core] |
+| Tapasco Host | <--- 1 ---> | [SecurityMonitor <--- 2 ---> RT-LIFE enabled RISC-V Core] |
 |--|--|--|
 
 The [TaPaSCo](https://git.esa.informatik.tu-darmstadt.de/tapasco/tapasco) framework is used for rapid prototyping. A dummy security monitor is packed together with the chosen RISC-V core inside a TaPaSCo-PE. In the following, we differentiate between PE-external (1) and PE-internal (2) signals:
-
-
 
 
 
@@ -53,7 +48,7 @@ Bluespec https://github.com/B-Lang-org/bsc
 RISC-V Toolchain https://github.com/riscv/riscv-gnu-toolchain  
 
 **Project structure:**   
-- Folder `core` contains RT-LIFE core wrappers and rudimentary SecMon dummies.  
+- Folder `core` contains RT-LIFE core wrappers and simplified Security Monitors.  
 - Folder `ip` contains the RT-LIFE extended cores together with their individual diffs. These originate from the TaPaSCo RISC-V repository.  
 - Folder `testPrograms` contains a number of small application examples.  
 - The project's `root directory` contains the project packaging scripts.  
@@ -66,7 +61,6 @@ RISC-V Toolchain https://github.com/riscv/riscv-gnu-toolchain
 - Have a closer look on control flow, memory write and register write instructions  
 - Have a closer look on `core/DexieReg_Nested`, `core/DexieMem_Nested` and `core/DexieCF_Nested`
 - Understand and edit the dummy Security Monitors in the middle of these files.
-
 - `make taiga_pe` (or any other core)
 - Using `tapasco-import`, `tapasco-compose` and `tapasco load-bitstream`, the design can be deloyed on any TaPaSCo-compatible FPGA board.
 
