@@ -1,6 +1,6 @@
 # RT-LIFE: A Portable Interface for Real-Time Lightweight Integrity Enforcement of RISC-V Cores
 
-**Description**
+**Description**  
 RT-LIFE is a framework, which standardizes an interface between a processor and an attached security monitor. Based on a unified behavior, its main goal is high portability for compatible security monitors. Existing interfaces are optimized for tracing [[1]](https://github.com/riscv/riscv-trace-spec), debugging [[2]](https://github.com/riscv/riscv-debug-spec) or formal verification [[3]](https://github.com/SymbioticEDA/riscv-formal) and focus on already commited instructions. As an alternative, RT-LIFE is fitted for minimal latency and focuses on uncommited instructions. For security monitors, an interface with minimal latency is crucial: Such monitors are typically most useful, if they can guarantee to prevent the core from executing malicious code ASAP with no or limited impact to the outside world. Depending on the individual core (its pipeline, its signal taps, its write latency...) and the intended security guarantees, even with RT-LIFE only 0 (combinatorial) - 2 clock cycles remain for the monitor's security evaluation. Of course, evaluation time can be extended via stall signals. 
 
 How latency is reduced: 
@@ -19,7 +19,7 @@ Supported cores are:
 - [Taiga](https://gitlab.com/sfu-rcl/Taiga)
 - [VexRiscv](https://github.com/SpinalHDL/VexRiscv)
 
-**Architecture**
+**Architecture**  
 | Tapasco Host | <--- 1 ---> | [SecurityMonitor <--- 2 ---> RT-LIFE enabled RISC-V Core] |
 |--|--|--|
 
@@ -66,8 +66,8 @@ RISC-V Toolchain https://github.com/riscv/riscv-gnu-toolchain
 
 - Be aware, that the first 16 words (64 Bytes) are configuration input for the dummy Security Monitors (currently not interpreted). Only subsequent data is written into the instruction memory of the attached RISC-V core.
 
-**Individual Licensing of the included cores (/ip/...)**
-The included files in /ip are foreign IP from foreign projects (RISC-V cores), which employ different licences:
+**Individual Licensing of the included cores:**  
+The included files in /ip/... are foreign IP from foreign projects (RISC-V cores), which employ different licences:
 - [Flute](https://github.com/bluespec/Flute/blob/master/LICENSE) - Apache 2.0
 - [Orca](https://github.com/kingcard1131/orca/blob/master/LICENSE.txt) - Proprietary
 - [Piccolo](https://github.com/bluespec/Piccolo/blob/master/LICENSE) - Apache 2.0
