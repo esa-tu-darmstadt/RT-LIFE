@@ -67,7 +67,7 @@ RISC-V Toolchain https://github.com/riscv/riscv-gnu-toolchain
 - Be aware, that the first 16 words (64 Bytes) are configuration input for the dummy Security Monitors (currently not interpreted). Only subsequent data is written into the instruction memory of the attached RISC-V core.
 
 **Individual Licensing of the included cores:**  
-The included files in /ip/... are foreign IP from foreign projects (RISC-V cores), which employ different licences:
+The included files in /ip/... are foreign IP from foreign projects (RISC-V cores), which employ their own licensing. These licenses also apply to the patches, we implemented for each individual core.
 - [Flute](https://github.com/bluespec/Flute/blob/master/LICENSE) - Apache 2.0
 - [Orca](https://github.com/kingcard1131/orca/blob/master/LICENSE.txt) - Proprietary
 - [Piccolo](https://github.com/bluespec/Piccolo/blob/master/LICENSE) - Apache 2.0
@@ -76,7 +76,8 @@ The included files in /ip/... are foreign IP from foreign projects (RISC-V cores
 - [VexRiscv](https://github.com/SpinalHDL/VexRiscv/blob/master/LICENSE) - MIT License
 
 
-**License RT-LIFE:**
+**License RT-LIFE:**  
+The following license applies to RT-LIFE's remining components, which are core wrappers, packaging scripts, Makefiles, Code examples, compiler scripts, AXI and Demo Security Monitors.
 
 Copyright (c) 2019-2020 Embedded Systems and Applications, TU Darmstadt.
 This file is part of RT-LIFE (see https://github.com/esa-tu-darmstadt/RT-LIFE).
