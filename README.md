@@ -15,12 +15,12 @@ How latency is reduced:
 
 By now RT-LIFE focuses on 32 bit IoT-class RISC-V cores, which are single-core, single-issue, and in-order type.
 Supported cores are:
-- Flute
-- Orca
-- Piccolo
-- PicoRV32
-- Taiga
-- VexRiscv
+- [Flute](https://github.com/bluespec/Flute)
+- [Orca (forked)](https://github.com/kingcard1131/orca), <s>[original source](https://github.com/VectorBlox/orca)</s>
+- [Piccolo](https://github.com/bluespec/Piccolo)
+- [PicoRV32](https://github.com/cliffordwolf/picorv32)
+- [Taiga](https://gitlab.com/sfu-rcl/Taiga)
+- [VexRiscv](https://github.com/SpinalHDL/VexRiscv)
 
 **Architecture**
 | Tapasco Host | <--- 1 ---> | [SecurityMonitor <--- 2 ---> RISC-V Core] |
@@ -72,7 +72,17 @@ RISC-V Toolchain https://github.com/riscv/riscv-gnu-toolchain
 
 - Be aware, that the first 16 words (64 Bytes) are configuration input for the dummy Security Monitors (currently not interpreted). Only subsequent data is written into the instruction memory of the attached RISC-V core.
 
-**License:**
+**Individual Licensing of the included cores (/ip/...)**
+The included files in /ip are foreign IP from foreign projects (RISC-V cores), which employ different licences:
+- [Flute](https://github.com/bluespec/Flute/blob/master/LICENSE) - Apache 2.0
+- [Orca](https://github.com/kingcard1131/orca/blob/master/LICENSE.txt) - Proprietary
+- [Piccolo](https://github.com/bluespec/Piccolo/blob/master/LICENSE) - Apache 2.0
+- [PicoRV32](https://en.wikipedia.org/wiki/ISC_license) - ISC License
+- [Taiga](https://gitlab.com/sfu-rcl/Taiga/-/blob/master/LICENSE) - Apach 2.0
+- [VexRiscv](https://github.com/SpinalHDL/VexRiscv/blob/master/LICENSE) - MIT License
+
+
+**License RT-LIFE:**
 
 Copyright (c) 2019-2020 Embedded Systems and Applications, TU Darmstadt.
 This file is part of RT-LIFE (see https://github.com/esa-tu-darmstadt/RT-LIFE).
