@@ -77,7 +77,7 @@ The included files in /ip/... are foreign IP from foreign projects (RISC-V cores
 
 
 **License RT-LIFE:**  
-The following license applies to RT-LIFE's remining components, which are core wrappers, packaging scripts, Makefiles, Code examples, compiler scripts, AXI and Demo Security Monitors.
+The following license applies to RT-LIFE's remaining components, which are core wrappers, packaging scripts, Makefiles, code examples, compiler scripts, AXI and Demo Security Monitors.
 
 Copyright (c) 2019-2020 Embedded Systems and Applications, TU Darmstadt.
 This file is part of RT-LIFE (see https://github.com/esa-tu-darmstadt/RT-LIFE).
